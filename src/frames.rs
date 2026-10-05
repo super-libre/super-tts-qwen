@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn no_audio_produces_no_frames() {
-        assert!(audio_frames(&[]).is_empty());
+        assert_eq!(audio_frames(&[]), Vec::<Vec<u8>>::new());
     }
 
     #[test]
