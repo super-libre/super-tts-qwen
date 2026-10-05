@@ -1532,7 +1532,10 @@ mod tests {
 
         let halves = table.rows(&ids, DType::F16).unwrap();
         let cast = crate::qwen3::bf16_to_f16(&TensorData::new(want, [1, 4, 2]));
-        assert_eq!(halves.as_slice::<f16>().unwrap(), cast.as_slice::<f16>().unwrap());
+        assert_eq!(
+            halves.as_slice::<f16>().unwrap(),
+            cast.as_slice::<f16>().unwrap()
+        );
     }
 
     #[test]
