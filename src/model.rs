@@ -874,21 +874,22 @@ impl QwenTts {
 
     /// Hand the device memory nothing holds any more back to the driver.
     ///
-    /// Run once, when the load is done. The allocator keeps the most any work
-    /// has asked of it: the warm-up's buffers, and on a first load those of
-    /// every candidate kernel its tuning tried. The weights live in the
-    /// persistent pool, exact-fit, and nothing here touches them; the f32
-    /// convolution weights that `convolve_in` replaced with f16 copies are
-    /// freed with the rest.
+    /// Run when the load is done, and by the model thread once no request has
+    /// come for a while. The allocator keeps the most any work has asked of
+    /// it: the warm-up's buffers, and on a first load those of every candidate
+    /// kernel its tuning tried. The weights live in the persistent pool,
+    /// exact-fit, and nothing here touches them; the f32 convolution weights
+    /// that `convolve_in` replaced with f16 copies are freed with the rest.
     ///
-    /// Only once: a request grows its working memory back, about 0.6 GB for
-    /// 0.6B on an RTX 3090, and keeps it for the next. Releasing it after every
-    /// request would make each sentence of an utterance allocate it again.
+    /// Not after every request: a request grows its working memory back, about
+    /// 0.6 GB for 0.6B on an RTX 3090, and keeps it for the next. Releasing it
+    /// after each one would make every sentence of an utterance allocate it
+    /// again.
     ///
     /// Synced after. On CUDA the pages are freed in stream order, into the
     /// driver's own pool, which hands them back to the system only at the next
     /// synchronization.
-    fn release_memory(&self) {
+    pub fn release_memory(&self) {
         self.device.memory_cleanup();
         if let Err(e) = self.device.sync() {
             log::warn!("syncing the device after releasing its memory failed: {e}");
