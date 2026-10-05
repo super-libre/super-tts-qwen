@@ -1526,7 +1526,7 @@ mod tests {
             .flat_map(|&id| rows[id as usize].map(bf16::from_f32))
             .collect();
         let f32s = table.rows(&ids, DType::F32).unwrap();
-        assert_eq!(f32s.shape.as_slice(), [1, 4, 2]);
+        assert_eq!(f32s.shape().as_slice(), [1, 4, 2]);
         let wide: Vec<f32> = want.iter().map(|v| v.to_f32()).collect();
         assert_eq!(f32s.as_slice::<f32>().unwrap(), wide);
 

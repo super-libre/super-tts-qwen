@@ -33,10 +33,11 @@
     buildid = "1"
     bytes = "1"
     # The model in `src/qwen3` is Burn's, vendored from this fork's `qwen3-tts`
-    # example (see that module's provenance note). Burn is pinned by revision:
-    # the model needs six fixes to Burn's fusion crates that are not upstream
-    # yet, and `burn` has no stability guarantee between revisions anyway. Two
-    # more ride on this revision: `into_data` reads the device when it is
+    # example (see that module's provenance note). Burn is pinned by revision,
+    # to the fork's `qwen3-tts-main` branch: upstream Burn main plus the commits
+    # the model needs. Six are fixes to Burn's fusion crates that are not
+    # upstream yet, and `burn` has no stability guarantee between revisions
+    # anyway. Two more ride on this revision: `into_data` reads the device when it is
     # called, where a fused in-place op on the tensor's next use could
     # overwrite the bytes before a lazy read, and `memory_cleanup` under fusion
     # drains the calling stream first, where it freed nothing dropped since the
@@ -50,33 +51,41 @@
     # generation instead of one per CUDA compute capability.
     burn = {
         git = "https://github.com/jorge-menjivar/burn.git",
-        rev = "8b232ba04c4d8bb7e8922fd88135c39aadc6c956",
+        rev = "059c75e21c9f4e4fdb466bbdbf8710873e1e805d",
         features = ["default", "cubecl", "extension"]
     }
     burn-cubecl = {
         git = "https://github.com/jorge-menjivar/burn.git",
-        rev = "8b232ba04c4d8bb7e8922fd88135c39aadc6c956",
-        features = ["default"]
+        rev = "059c75e21c9f4e4fdb466bbdbf8710873e1e805d",
+        features = ["default"],
+        optional = true
     }
     burn-fusion = {
         git = "https://github.com/jorge-menjivar/burn.git",
-        rev = "8b232ba04c4d8bb7e8922fd88135c39aadc6c956",
-        features = ["default"]
+        rev = "059c75e21c9f4e4fdb466bbdbf8710873e1e805d",
+        features = ["default"],
+        optional = true
     }
     burn-ir = {
         git = "https://github.com/jorge-menjivar/burn.git",
-        rev = "8b232ba04c4d8bb7e8922fd88135c39aadc6c956"
+        rev = "059c75e21c9f4e4fdb466bbdbf8710873e1e805d",
+        optional = true
     }
     burn-store = {
         git = "https://github.com/jorge-menjivar/burn.git",
-        rev = "8b232ba04c4d8bb7e8922fd88135c39aadc6c956",
+        rev = "059c75e21c9f4e4fdb466bbdbf8710873e1e805d",
         features = ["std", "safetensors"]
     }
-    # Same revision Burn pins, so one CubeCL is built rather than two.
+    # Same revision Burn pins, so one CubeCL is built rather than two. CubeCL
+    # keeps compiled kernels and tuning results on disk only with its
+    # `persistence` feature, which Burn leaves to its GPU backends' defaults;
+    # the CPU build the tests run on compiles the kernel-cache setup in
+    # `model.rs` too, so it is asked for here, for every build.
     cubecl = {
         git = "https://github.com/tracel-ai/cubecl",
-        rev = "1c80a9d0b1c726465bd50c85d9cdcaa201f71f11",
-        default-features = false
+        rev = "33b6dfbd63cc8fa08346a2c77b04f156b9192e62",
+        default-features = false,
+        features = ["persistence"]
     }
     env_logger = "0.11"
     hyper = { version = "1", features = ["http1", "server"] }
@@ -115,30 +124,39 @@
 # codec and the sampler without a GPU; `just test` selects it.
 [features]
     default = ["vulkan"]
-    cuda = ["burn/cuda"]
+    # CubeCL compiles CUDA kernels through LLVM unless its C++ backend is
+    # asked for, and LLVM has no tensor-core form for bf16 or tf32: every
+    # matmul of the bf16 talker would run on plain CUDA cores.
+    cuda = ["burn/cuda", "cubecl/cuda-cpp", "cube"]
     flex = ["burn/flex"]
-    metal = ["burn/metal"]
-    rocm = ["burn/rocm"]
-    vulkan = ["burn/vulkan"]
-    wgpu = ["burn/wgpu"]
+    metal = ["burn/metal", "cube"]
+    rocm = ["burn/rocm", "cube"]
+    vulkan = ["burn/vulkan", "cube"]
+    wgpu = ["burn/wgpu", "cube"]
+    # The crates the sampling kernel reaches the CubeCL backends through, for
+    # the GPU builds only: `burn-cubecl` does not compile without a CubeCL
+    # runtime in the build, which `flex` has none of.
+    cube = ["dep:burn-cubecl", "dep:burn-fusion", "dep:burn-ir"]
 
 [lints.clippy]
     pedantic = "warn"
 
 
-# The CubeCL the fork's `qwen3-tts` branch builds against: the pinned upstream
-# revision plus its `compilation-cache-default` branch. A `[patch]` in Burn's
-# own manifest does not reach a build that merely depends on Burn — patches
-# come from the root of the crate being built — so this backend has to repeat
-# it, or it would build a different CubeCL than the branch was measured on.
-# Four commits ride on it: compiled kernels kept across runs by default, the
+# The CubeCL the fork's `qwen3-tts-main` branch builds against: CubeCL main
+# plus the fork's `compilation-cache-main` branch. A `[patch]` in Burn's own
+# manifest does not reach a build that merely depends on Burn — patches come
+# from the root of the crate being built — so this backend has to repeat it,
+# or it would build a different CubeCL than the branch was measured on.
+# Seven commits ride on it: compiled kernels kept across runs by default, the
 # sliced memory pool coalescing its free slices lazily rather than on every
 # free, the channel server taking a partial batch when its producer pauses
-# — which is every frame of a stream — and a CPU-backend read returning a copy
-# rather than a live view.
+# — which is every frame of a stream — a CPU-backend read returning a copy
+# rather than a live view, an empty allocation getting a page CUDA accepts,
+# the kernel cache's database taking turns across connections, and CUDA and
+# HIP graphs captured in relaxed mode, so other streams keep working.
 [patch."https://github.com/tracel-ai/cubecl"]
-    cubecl = { git = "https://github.com/jorge-menjivar/cubecl", rev = "46f7861b8e941823bcff79238b5181f78c6364dd" }
-    cubecl-common = { git = "https://github.com/jorge-menjivar/cubecl", rev = "46f7861b8e941823bcff79238b5181f78c6364dd" }
-    cubecl-environment = { git = "https://github.com/jorge-menjivar/cubecl", rev = "46f7861b8e941823bcff79238b5181f78c6364dd" }
-    cubecl-ir = { git = "https://github.com/jorge-menjivar/cubecl", rev = "46f7861b8e941823bcff79238b5181f78c6364dd" }
-    cubecl-zspace = { git = "https://github.com/jorge-menjivar/cubecl", rev = "46f7861b8e941823bcff79238b5181f78c6364dd" }
+    cubecl = { git = "https://github.com/jorge-menjivar/cubecl", rev = "8f4b1b36dc7f870cc65d297b8b2286af2d8986dc" }
+    cubecl-common = { git = "https://github.com/jorge-menjivar/cubecl", rev = "8f4b1b36dc7f870cc65d297b8b2286af2d8986dc" }
+    cubecl-environment = { git = "https://github.com/jorge-menjivar/cubecl", rev = "8f4b1b36dc7f870cc65d297b8b2286af2d8986dc" }
+    cubecl-ir = { git = "https://github.com/jorge-menjivar/cubecl", rev = "8f4b1b36dc7f870cc65d297b8b2286af2d8986dc" }
+    cubecl-zspace = { git = "https://github.com/jorge-menjivar/cubecl", rev = "8f4b1b36dc7f870cc65d297b8b2286af2d8986dc" }
