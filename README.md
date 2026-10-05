@@ -222,12 +222,16 @@ ROCm's compiler makes the talker and the code predictor four to six times slower
 than Vulkan's on the same card. The daemon ranks ROCm above Vulkan all the same,
 which on a card like this one picks the slower of the two.
 
-The 0.6B CustomVoice model holds 3.3 GB of the RTX 3090 on CUDA and 3.4 GB on
-Vulkan once it has served a request, 2.2 GB of it the weights, and 4.1 GB of an
-8 GB M2. Two things keep it there. The weights load into exact-fit allocations
-of their own, CubeCL's persistent pool, rather than into the pages the
-activations share, where a page holding one weight can never be handed back.
-And the codec decoder's convolutions run over the frames a streamed chunk
+The 0.6B CustomVoice model holds 2.7 GB of the RTX 3090 on CUDA and 2.8 GB on
+Vulkan once it has served a request, 1.6 GB of it the weights, and 3.6 to 3.8 GB
+of an 8 GB M2. Thirty seconds after its last request it hands back what the
+requests grew, down to 2.3 GB on CUDA, 2.4 GB on Vulkan and 2.1 to 2.4 GB on the
+M2. Three things keep it there. The weights load into exact-fit allocations of
+their own, CubeCL's persistent pool, rather than into the pages the activations
+share, where a page holding one weight can never be handed back. The talker's
+text embedding, a third of its parameters and 622 MB, stays in the checkpoint:
+only a prompt reads it, so a prompt reads the few hundred rows it needs from the
+file. And the codec decoder's convolutions run over the frames a streamed chunk
 returns and the ten before them, which is as far back as they reach, rather
 than over the whole 175-frame window the transformer ahead of them needs. Over
 the window they took 2.4 GB of working memory and most of the decoder's time:
