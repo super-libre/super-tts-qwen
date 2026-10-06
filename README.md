@@ -182,8 +182,8 @@ template that has moved.
 
 A GPU is required. The talker is a transformer generating 12.5 frames per
 second of speech. Measured on an RTX 3090 with a warm kernel cache, the 0.6B
-CustomVoice model loads in 3 seconds, sends its first audio 0.3 seconds into a
-request and synthesizes at about 6x real time — 19 seconds of speech in 3.2. A
+CustomVoice model loads in 5 seconds, sends its first audio 0.3 seconds into a
+request and synthesizes at about 6.5x real time — 27 seconds of speech in 4.2. A
 CPU is nowhere near that: the 1.7B talker generated about one frame every ten
 seconds on one, so there is no CPU build.
 
@@ -212,23 +212,24 @@ mantissa of the TF32 that CUDA runs them at, and the decoded audio stays 52 to
 65 dB from an f32 decode, around 60, where the decoder's own noise is 65.
 
 Measured on the RTX 3090 with NVIDIA's 610.57.04 driver, the 1.7B CustomVoice
-model on Vulkan synthesizes at 3.0 to 3.5x real time, against 3.7 to 4.2x on
-CUDA. Its first load, with its own kernel cache and the driver's shader cache
-both empty, takes about two minutes.
+model on Vulkan synthesizes at 4.2x real time, against 5.5x on CUDA. Its first
+load, with its own kernel cache and the driver's shader cache both empty, takes
+about two minutes.
 
 On an AMD BC-250 (gfx1013, an RDNA2 part with no matrix units), the 0.6B
-CustomVoice model synthesizes at 1.2x real time on Vulkan and 0.3x on ROCm:
+CustomVoice model synthesizes at 2.1x real time on Vulkan and 0.4x on ROCm:
 ROCm's compiler makes the talker and the code predictor four to six times slower
 than Vulkan's on the same card. The daemon ranks ROCm above Vulkan all the same,
 which on a card like this one picks the slower of the two.
 
-The 0.6B CustomVoice model holds 2.7 GB of the RTX 3090 on CUDA and 2.8 GB on
-Vulkan once it has served a request, 1.6 GB of it the weights, and 3.6 to 3.8 GB
-of an 8 GB M2. Thirty seconds after its last request it hands back what the
-requests grew, down to 2.3 GB on CUDA, 2.4 GB on Vulkan and 2.1 to 2.4 GB on the
-M2. Three things keep it there. The weights load into exact-fit allocations of
-their own, CubeCL's persistent pool, rather than into the pages the activations
-share, where a page holding one weight can never be handed back. The talker's
+The 0.6B CustomVoice model holds 2.5 GB of the RTX 3090 on CUDA and 2.2 to
+2.3 GB on Vulkan once it has served a request, 1.6 GB of it the weights, and
+2.75 GB of an 8 GB M2. Thirty seconds after its last request it hands back what
+the requests grew, down to 2.3 GB on CUDA, 2.1 GB on Vulkan and 2.6 to 2.7 GB
+on the M2. Three things keep it there. The weights load into exact-fit
+allocations of their own, CubeCL's persistent pool, rather than into the pages
+the activations share, where a page holding one weight can never be handed
+back. The talker's
 text embedding, a third of its parameters and 622 MB, stays in the checkpoint:
 only a prompt reads it, so a prompt reads the few hundred rows it needs from the
 file. And the codec decoder's convolutions run over the frames a streamed chunk
@@ -236,8 +237,9 @@ returns and the ten before them, which is as far back as they reach, rather
 than over the whole 175-frame window the transformer ahead of them needs. Over
 the window they took 2.4 GB of working memory and most of the decoder's time:
 the same change took the M2 from 0.6x to 1.2x real time. A first load still
-peaks higher for a moment, 8 to 10 GB on the 3090, while CubeCL benchmarks
-candidate kernels, and hands the memory back when it is done.
+peaks higher for a moment while CubeCL benchmarks candidate kernels, 4.4 GB on
+the 3090 on Vulkan and 5.1 GB on CUDA, and hands the memory back when it is
+done.
 
 Weights are downloaded by the daemon before the first load. This process has no
 network at all — it runs with `PrivateNetwork=yes` and a read-only backend
@@ -294,9 +296,9 @@ What that wait costs, on an RTX 3090:
 
 | Load | Time | What it pays for |
 |---|---|---|
-| Nothing cached | ~7 minutes on CUDA, ~2 on Vulkan | Compiling a few hundred kernels and tuning every shape the warm-up walks. Once per GPU. |
+| Nothing cached | ~6 minutes on CUDA, 1 to 2 on Vulkan | Compiling a few hundred kernels and tuning every shape the warm-up walks. Once per GPU. |
 | After a backend upgrade | under a minute | Compiling only: the cache keys kernels by build, but the tuning results survive it. |
-| Same build again | 5.5 seconds | Mapping the weights, and a warm-up that finds everything already there. |
+| Same build again | 5 seconds | Mapping the weights, and a warm-up that finds everything already there. |
 
 The first row is the one to design around, and it is the reason the cache
 directory exists at all — without it, *every* load is that row, and without the
@@ -309,12 +311,13 @@ the kernels, written once a warm-up runs to the end, tells them apart, so
 clearing the cache makes the next load an initial setup again. `step` is
 `loading_weights`, measured by the bytes of the checkpoints read, then
 `building_kernels` on an initial setup or `warming_up` after. The warm-up is
-measured by the entries CubeCL writes to the cache — 1730 of them on CUDA and
-724 on Vulkan from empty on an RTX 3090, 644 on ROCm on an AMD BC-250 — plus one
-per frame it generates, which is what keeps the bar moving where nothing is
-compiled. The daemon fails a load whose step and progress stand still for two
-minutes; the longest stretch without either moving was 4.7 seconds on CUDA and
-1.6 on Vulkan, and 22 on the BC-250, whose first load takes 14 minutes.
+measured by the entries CubeCL writes to the cache — 2615 of them on CUDA and
+1409 on Vulkan from empty on an RTX 3090, 1226 on ROCm on an AMD BC-250, 822 on
+Metal on an M2 — plus one per frame it generates, which is what keeps the bar
+moving where nothing is compiled. The daemon fails a load whose step and
+progress stand still for two minutes; the longest stretch without either moving
+was 5 seconds on CUDA, 2 on Vulkan and 2.5 on Metal, and 20 on the BC-250,
+whose first load takes 8 minutes.
 
 ### Building
 
