@@ -25,10 +25,14 @@ use crate::qwen3::sampling::{MASKED, Sampling};
 use crate::qwen3::speaker_encoder::{MelConfig, SpeakerEncoder, mel_spectrogram};
 use crate::qwen3::transformer::{Transformer, TransformerConfig, TransformerState};
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::ops::ControlFlow;
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 impl CodePredictorConfig {
     fn transformer_config(&self) -> TransformerConfig {
@@ -197,9 +201,9 @@ impl CodePredictor {
     }
 }
 
+/// The text embedding is not here: it stays in the checkpoint, see [`TextTable`].
 #[derive(Module, Debug)]
 struct TalkerBackbone {
-    text_embedding: Embedding,
     codec_embedding: Embedding,
     transformer: Transformer,
 }
@@ -285,8 +289,6 @@ impl Model {
         let tc = &cfg.talker_config;
         let talker = Talker {
             model: TalkerBackbone {
-                text_embedding: EmbeddingConfig::new(tc.text_vocab_size, tc.text_hidden_size)
-                    .init(device),
                 codec_embedding: EmbeddingConfig::new(tc.vocab_size, tc.hidden_size).init(device),
                 transformer: Transformer::init(&tc.transformer_config(), device),
             },
@@ -311,6 +313,107 @@ impl Model {
             talker,
             speaker_encoder,
         })
+    }
+}
+
+/// The talker's text embedding table, which stays in the checkpoint: a prompt reads the
+/// rows it needs from the file and uploads them.
+///
+/// The table is a third of the talker's parameters, 151 936 rows of 2048 (622 MB in bf16),
+/// and only the prompt reads it, a few hundred rows a request. On the device it would hold
+/// those 622 MB for the life of the process; from the file a prompt costs a few hundred
+/// reads of 4 KB, which the page cache serves after the first.
+struct TextTable {
+    file: File,
+    /// Where its first row starts in the file.
+    start: u64,
+    rows: usize,
+    width: usize,
+    /// The dtype the checkpoint stores it in.
+    dtype: DType,
+}
+
+impl TextTable {
+    const NAME: &str = "talker.model.text_embedding.weight";
+
+    /// Finds the table in the header of the safetensors file at `path`, which must hold it
+    /// as `rows` rows of `width`.
+    fn open(path: &Path, rows: usize, width: usize) -> Result<Self, String> {
+        #[derive(serde::Deserialize)]
+        struct Entry {
+            dtype: String,
+            shape: Vec<usize>,
+            data_offsets: [u64; 2],
+        }
+        let fail = |err: &dyn std::fmt::Display| {
+            format!("reading the text embedding of {}: {err}", path.display())
+        };
+        let mut file = File::open(path).map_err(|e| fail(&e))?;
+        let mut len = [0; 8];
+        file.read_exact(&mut len).map_err(|e| fail(&e))?;
+        let len = u64::from_le_bytes(len);
+        // A header is tens of kilobytes; this bounds what a corrupt length would allocate.
+        if len > 1 << 26 {
+            return Err(fail(&format!("its header claims {len} bytes")));
+        }
+        let mut header = vec![0; len as usize];
+        file.read_exact(&mut header).map_err(|e| fail(&e))?;
+        let mut header: HashMap<String, serde_json::Value> =
+            serde_json::from_slice(&header).map_err(|e| fail(&e))?;
+        let entry = header
+            .remove(Self::NAME)
+            .ok_or_else(|| fail(&format!("no {}", Self::NAME)))?;
+        let entry: Entry = serde_json::from_value(entry).map_err(|e| fail(&e))?;
+        let dtype = match entry.dtype.as_str() {
+            "BF16" => DType::BF16,
+            "F16" => DType::F16,
+            "F32" => DType::F32,
+            other => return Err(fail(&format!("it is stored as {other}"))),
+        };
+        let [begin, end] = entry.data_offsets;
+        let bytes = (rows * width * dtype.size()) as u64;
+        if entry.shape != [rows, width] || end.checked_sub(begin) != Some(bytes) {
+            return Err(fail(&format!(
+                "it is {:?} over bytes {begin}..{end}, the configuration says [{rows}, {width}]",
+                entry.shape
+            )));
+        }
+        Ok(Self {
+            file,
+            start: 8 + len + begin,
+            rows,
+            width,
+            dtype,
+        })
+    }
+
+    /// Its size in the file.
+    fn bytes(&self) -> u64 {
+        (self.rows * self.width * self.dtype.size()) as u64
+    }
+
+    /// The rows of `ids`, (1, len, width) in `dtype`.
+    fn rows(&self, ids: &[u32], dtype: DType) -> Result<TensorData, String> {
+        let row = self.width * self.dtype.size();
+        let mut bytes = vec![0; ids.len() * row];
+        let mut file = &self.file;
+        for (&id, out) in ids.iter().zip(bytes.chunks_exact_mut(row)) {
+            if id as usize >= self.rows {
+                return Err(format!(
+                    "token {id} is past the {} rows of the text embedding",
+                    self.rows
+                ));
+            }
+            file.seek(SeekFrom::Start(self.start + u64::from(id) * row as u64))
+                .and_then(|_| file.read_exact(out))
+                .map_err(|e| format!("reading the text embedding of token {id}: {e}"))?;
+        }
+        // The conversion the load makes for the weights it uploads (`FloatCastAdapter`, and
+        // `HalfCast` with the same arithmetic), so the rows are what the device would hold.
+        Ok(
+            TensorData::from_bytes_vec(bytes, [1, ids.len(), self.width], self.dtype)
+                .convert_dtype(dtype),
+        )
     }
 }
 
@@ -513,6 +616,7 @@ struct TalkerGraphs {
 
 pub struct Qwen3Tts {
     model: Model,
+    text_table: TextTable,
     talker_state: TransformerState,
     code_predictor_state: TransformerState,
     frame: Rc<RefCell<FrameState>>,
@@ -533,7 +637,7 @@ impl Qwen3Tts {
     /// `read` counts the file's bytes as they are read.
     pub fn load(
         cfg: &Config,
-        weights: &std::path::Path,
+        weights: &Path,
         dtype: DType,
         device: &Device,
         read: &Arc<AtomicU64>,
@@ -546,19 +650,33 @@ impl Qwen3Tts {
                 cfg.talker_config.vocab_size, cfg.talker_config.codec_eos_token_id
             ));
         }
-        let mut model = Model::init(cfg, device)?;
-        let mut store = SafetensorsStore::from_file(weights)
-            .with_from_adapter(
-                crate::qwen3::ReadCounter(Arc::clone(read))
-                    .chain(crate::qwen3::CheckpointAdapter)
-                    .chain(crate::qwen3::HalfCast { target: dtype })
-                    .chain(FloatCastAdapter::to(dtype)),
-            )
-            .remap(remapper(cfg)?)
-            .allow_partial(true);
-        let mut result = model
-            .load_from(&mut store)
-            .map_err(|err| format!("failed to load {}: {err}", weights.display()))?;
+        let text_table = TextTable::open(
+            weights,
+            cfg.talker_config.text_vocab_size,
+            cfg.talker_config.text_hidden_size,
+        )?;
+        // Never read as part of the load, the table counts as read: the progress of the
+        // load is the share of the files' bytes read.
+        read.fetch_add(text_table.bytes(), Ordering::Relaxed);
+        // The weights go to the persistent pool: exact-fit allocations that live
+        // for the process. In the dynamic pools they would share pages with the
+        // activations, and a page a weight sits in can never be handed back.
+        let (mut model, mut result) = device.memory_persistent_allocations((), |()| {
+            let mut model = Model::init(cfg, device)?;
+            let mut store = SafetensorsStore::from_file(weights)
+                .with_from_adapter(
+                    crate::qwen3::ReadCounter(Arc::clone(read))
+                        .chain(crate::qwen3::CheckpointAdapter)
+                        .chain(crate::qwen3::HalfCast { target: dtype })
+                        .chain(FloatCastAdapter::to(dtype)),
+                )
+                .remap(remapper(cfg)?)
+                .allow_partial(true);
+            let result = model
+                .load_from(&mut store)
+                .map_err(|err| format!("failed to load {}: {err}", weights.display()))?;
+            Ok::<_, String>((model, result))
+        })?;
         // The configuration announces the speaker encoder; a checkpoint without any of its
         // weights loads without it, and simply cannot clone.
         let speaker_encoder = |path: &str| path.starts_with("speaker_encoder.");
@@ -591,6 +709,7 @@ impl Qwen3Tts {
             graph_talker: false,
             talker_graphs: None,
             model,
+            text_table,
             config: cfg.clone(),
             device: device.clone(),
             dtype,
@@ -949,10 +1068,10 @@ impl Qwen3Tts {
     }
 
     /// Text embeddings projected to the talker dimension, shape (1, len, hidden_size).
-    fn text_embed(&self, ids: &[u32]) -> Tensor<3> {
-        let talker = &self.model.talker;
-        let embeddings = talker.model.text_embedding.forward(self.ids_tensor(ids));
-        talker.text_projection.forward(embeddings)
+    fn text_embed(&self, ids: &[u32]) -> Result<Tensor<3>, String> {
+        let rows = self.text_table.rows(ids, self.dtype)?;
+        let embeddings = Tensor::from_data(rows, (&self.device, self.dtype));
+        Ok(self.model.talker.text_projection.forward(embeddings))
     }
 
     /// Codec embeddings, shape (1, len, hidden_size).
@@ -1070,7 +1189,7 @@ impl Qwen3Tts {
         if let Some(instruct_ids) = prompt.instruct_ids
             && !instruct_ids.is_empty()
         {
-            parts.push(self.text_embed(instruct_ids));
+            parts.push(self.text_embed(instruct_ids)?);
         }
 
         let speaker_embed = self.speaker_embed(prompt.voice)?;
@@ -1080,7 +1199,7 @@ impl Qwen3Tts {
             cfg.tts_bos_token_id,
             cfg.tts_eos_token_id,
             cfg.tts_pad_token_id,
-        ]);
+        ])?;
         let tts_bos = special.clone().narrow(1, 0, 1);
         let tts_eos = special.clone().narrow(1, 1, 1);
         let tts_pad = special.narrow(1, 2, 1);
@@ -1107,7 +1226,7 @@ impl Qwen3Tts {
         let k = codec_input.dims()[1];
 
         // <|im_start|>assistant\n
-        let role = self.text_embed(&prompt.input_ids[..3]);
+        let role = self.text_embed(&prompt.input_ids[..3])?;
         // tts_pad * (k - 2) + tts_bos, summed with the codec prefix but its final codec_bos.
         let hidden_size = tc.hidden_size;
         let text_prefix = Tensor::cat(
@@ -1135,7 +1254,7 @@ impl Qwen3Tts {
                 // codes: it continues the recording with the text, in the same voice.
                 let mut ids = icl.ref_ids[3..m - 2].to_vec();
                 ids.extend_from_slice(text_ids);
-                let text_embed = Tensor::cat(vec![self.text_embed(&ids), tts_eos], 1);
+                let text_embed = Tensor::cat(vec![self.text_embed(&ids)?, tts_eos], 1);
                 let codec_embed =
                     Tensor::cat(vec![codec_bos, self.frames_embed(icl.ref_codes)?], 1);
                 let text_len = text_embed.dims()[1];
@@ -1158,15 +1277,15 @@ impl Qwen3Tts {
                 }
             }
             None if prompt.non_streaming_mode => {
-                let text = Tensor::cat(vec![self.text_embed(text_ids), tts_eos], 1) + codec_pad;
+                let text = Tensor::cat(vec![self.text_embed(text_ids)?, tts_eos], 1) + codec_pad;
                 embeds.push(text);
                 embeds.push(tts_pad.clone() + codec_bos);
                 tts_pad.clone()
             }
             None => {
-                embeds.push(self.text_embed(&text_ids[..1]) + codec_bos);
+                embeds.push(self.text_embed(&text_ids[..1])? + codec_bos);
                 if text_ids.len() > 1 {
-                    Tensor::cat(vec![self.text_embed(&text_ids[1..]), tts_eos], 1)
+                    Tensor::cat(vec![self.text_embed(&text_ids[1..])?, tts_eos], 1)
                 } else {
                     tts_eos
                 }
@@ -1357,4 +1476,77 @@ fn remapper(cfg: &Config) -> Result<KeyRemapper, String> {
         }
     }
     KeyRemapper::from_patterns(patterns).map_err(|err| format!("invalid remapping: {err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use burn::tensor::{bf16, f16};
+
+    /// Writes a checkpoint holding a tensor and, after it, a text embedding of `table`'s
+    /// rows in bf16.
+    fn checkpoint(path: &Path, table: &[[f32; 2]]) {
+        let table: Vec<u8> = table
+            .iter()
+            .flatten()
+            .flat_map(|&v| bf16::from_f32(v).to_le_bytes())
+            .collect();
+        let header = serde_json::json!({
+            "__metadata__": {"format": "pt"},
+            "talker.codec_head.weight": {"dtype": "F32", "shape": [2], "data_offsets": [0, 8]},
+            "talker.model.text_embedding.weight": {
+                "dtype": "BF16",
+                "shape": [table.len() / 4, 2],
+                "data_offsets": [8, 8 + table.len()],
+            },
+        })
+        .to_string();
+        let mut file = Vec::new();
+        file.extend_from_slice(&(header.len() as u64).to_le_bytes());
+        file.extend_from_slice(header.as_bytes());
+        file.extend_from_slice(&[0; 8]);
+        file.extend_from_slice(&table);
+        std::fs::write(path, file).unwrap();
+    }
+
+    /// The rows come out of the file as the load would have uploaded the table: bf16 widened
+    /// to f32 exactly, and narrowed to f16 as `HalfCast` does, a subnormal included.
+    #[test]
+    fn the_text_table_reads_the_rows_the_load_would_have_uploaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.safetensors");
+        let rows = [[1.0, -2.0], [0.333, 3e-6], [-1e4, 0.1]];
+        checkpoint(&path, &rows);
+        let table = TextTable::open(&path, 3, 2).unwrap();
+        assert_eq!(table.bytes(), 12);
+
+        let ids = [2, 0, 2, 1];
+        let want: Vec<bf16> = ids
+            .iter()
+            .flat_map(|&id| rows[id as usize].map(bf16::from_f32))
+            .collect();
+        let f32s = table.rows(&ids, DType::F32).unwrap();
+        assert_eq!(f32s.shape().as_slice(), [1, 4, 2]);
+        let wide: Vec<f32> = want.iter().map(|v| v.to_f32()).collect();
+        assert_eq!(f32s.as_slice::<f32>().unwrap(), wide);
+
+        let halves = table.rows(&ids, DType::F16).unwrap();
+        let cast = crate::qwen3::bf16_to_f16(&TensorData::new(want, [1, 4, 2]));
+        assert_eq!(
+            halves.as_slice::<f16>().unwrap(),
+            cast.as_slice::<f16>().unwrap()
+        );
+    }
+
+    #[test]
+    fn the_text_table_refuses_a_shape_or_token_it_does_not_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.safetensors");
+        checkpoint(&path, &[[1.0, 2.0], [3.0, 4.0]]);
+        let err = TextTable::open(&path, 3, 2).err().unwrap();
+        assert!(err.contains("[2, 2]"), "{err}");
+        let table = TextTable::open(&path, 2, 2).unwrap();
+        let err = table.rows(&[0, 2], DType::F32).unwrap_err();
+        assert!(err.contains("token 2"), "{err}");
+    }
 }
