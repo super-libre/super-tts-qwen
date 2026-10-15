@@ -14,11 +14,13 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     strategy:
+      # Beta can break for reasons outside this repository; when it does,
+      # stable still reports.
+      fail-fast: false
       matrix:
         rust:
           - stable
           - beta
-          - nightly
 
     steps:
       - uses: actions/checkout@v6

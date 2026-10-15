@@ -459,19 +459,25 @@ const ON_GPU: bool = cfg!(any(
 const BUILDS_KERNELS: bool = ON_GPU;
 
 /// The entries a first load's warm-up writes to the kernel cache, tuning
-/// results and compiled kernels both: 1730 on CUDA and 724 on Vulkan, measured
-/// on an empty cache with the 1.7B CustomVoice checkpoint on an RTX 3090. ROCm
-/// is taken to be CUDA, and Metal and the generic `wgpu` to be Vulkan,
-/// unmeasured. Only the pace of the bar rides on it: past
-/// the estimate it slows down short of the end rather than stopping, see
-/// `progress::estimate`, and a checkpoint that writes fewer ends its step
-/// early.
+/// results and compiled kernels both: 2615 on CUDA and 1409 on Vulkan, measured
+/// on an empty cache with the 1.7B CustomVoice checkpoint on an RTX 3090 (the
+/// 0.6B writes as many), 1226 on ROCm with 0.6B CustomVoice on an AMD BC-250
+/// (gfx1013, which has no matrix units: a card that has them tunes more
+/// candidates), and 822 on Metal with 0.6B CustomVoice on an Apple M2. The
+/// generic `wgpu` is taken to be Vulkan, unmeasured. Only the pace of the bar
+/// rides on it: past the estimate it slows down short of the end rather than
+/// stopping, see `progress::estimate`, and a checkpoint that writes fewer ends
+/// its step early.
 const WARM_UP_CACHE_ENTRIES: u64 = if !BUILDS_KERNELS {
     0
-} else if cfg!(any(feature = "vulkan", feature = "metal", feature = "wgpu")) {
-    724
+} else if cfg!(feature = "metal") {
+    822
+} else if cfg!(any(feature = "vulkan", feature = "wgpu")) {
+    1409
+} else if cfg!(feature = "rocm") {
+    1226
 } else {
-    1730
+    2615
 };
 
 /// The units of work a warm-up in `phase` is expected to do, which is what
@@ -712,6 +718,7 @@ impl QwenTts {
                 frames.load(Ordering::Relaxed),
                 warm_up_work(phase)
             );
+            model.release_memory();
             anyhow::Ok((model, warmed))
         })?;
         if warmed && let Some(marker) = marker {
@@ -866,6 +873,30 @@ impl QwenTts {
     #[must_use]
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
+    }
+
+    /// Hand the device memory nothing holds any more back to the driver.
+    ///
+    /// Run when the load is done, and by the model thread once no request has
+    /// come for a while. The allocator keeps the most any work has asked of
+    /// it: the warm-up's buffers, and on a first load those of every candidate
+    /// kernel its tuning tried. The weights live in the persistent pool,
+    /// exact-fit, and nothing here touches them; the f32 convolution weights
+    /// that `convolve_in` replaced with f16 copies are freed with the rest.
+    ///
+    /// Not after every request: a request grows its working memory back, about
+    /// 0.6 GB for 0.6B on an RTX 3090, and keeps it for the next. Releasing it
+    /// after each one would make every sentence of an utterance allocate it
+    /// again.
+    ///
+    /// Synced after. On CUDA the pages are freed in stream order, into the
+    /// driver's own pool, which hands them back to the system only at the next
+    /// synchronization.
+    pub fn release_memory(&self) {
+        self.device.memory_cleanup();
+        if let Err(e) = self.device.sync() {
+            log::warn!("syncing the device after releasing its memory failed: {e}");
+        }
     }
 
     /// The device the model is actually running on, as `GET /v1/status` reports it.
@@ -1494,9 +1525,12 @@ impl<'a> ChunkDecoder<'a> {
         // `decode_window` drops the context's audio itself: it was decoded only
         // so the seam between this chunk and the last one matches a single
         // decode.
-        let pcm = self
-            .speech_tokenizer
-            .decode_window(codes, context, self.window_frames);
+        let pcm = self.speech_tokenizer.decode_window(
+            codes,
+            context,
+            self.window_frames,
+            STREAM_CHUNK_FRAMES,
+        );
         self.written = frames;
         Some(pcm)
     }
@@ -1799,10 +1833,10 @@ mod tests {
         let mut time = |window: usize| {
             let context = window - STREAM_CHUNK_FRAMES;
             let prefix = &codes[..window * groups];
-            speech_tokenizer.decode_window(prefix, context, window);
+            speech_tokenizer.decode_window(prefix, context, window, STREAM_CHUNK_FRAMES);
             let started = std::time::Instant::now();
             for _ in 0..5 {
-                speech_tokenizer.decode_window(prefix, context, window);
+                speech_tokenizer.decode_window(prefix, context, window, STREAM_CHUNK_FRAMES);
             }
             started.elapsed() / 5
         };
