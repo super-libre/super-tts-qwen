@@ -13,7 +13,12 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    # Nightly can break for reasons outside this repository, as `branches` 0.4
+    # (under CubeCL's kernel cache) did on rustc 1.101: it still runs and
+    # reports, but it neither cancels stable and beta nor fails the workflow.
+    continue-on-error: ${{ matrix.rust == 'nightly' }}
     strategy:
+      fail-fast: false
       matrix:
         rust:
           - stable
