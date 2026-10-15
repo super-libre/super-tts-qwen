@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("binding {}", socket_path.display()))?;
     log::info!(
-        "qwen-tts backend listening on {} (dir {})",
+        "qwen backend listening on {} (dir {})",
         socket_path.display(),
         backend_dir.display()
     );

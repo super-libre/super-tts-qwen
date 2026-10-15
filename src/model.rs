@@ -653,7 +653,7 @@ fn warm_marker(model: &str) -> Option<PathBuf> {
         },
     );
     CACHE_DIR.get().map(|dir| {
-        dir.join("qwen-tts-warm")
+        dir.join("qwen-warm")
             .join(format!("{model}-{BUILT_FOR}-{build}"))
     })
 }

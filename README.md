@@ -1,6 +1,6 @@
-# Super TTS — Qwen TTS backend
+# Super TTS — Qwen backend
 
-[![coverage](https://img.shields.io/endpoint?url=https://super-libre.github.io/super-tts-qwen-tts/coverage.json)](https://super-libre.github.io/super-tts-qwen-tts/)
+[![coverage](https://img.shields.io/endpoint?url=https://super-libre.github.io/super-tts-qwen/coverage.json)](https://super-libre.github.io/super-tts-qwen/)
 
 Qwen's text-to-speech models as a subprocess backend for
 [Super TTS](https://github.com/super-libre/super-tts). Ten languages, 24 kHz
@@ -322,7 +322,7 @@ whose first load takes 8 minutes.
 ### Building
 
 ```sh
-git clone https://github.com/super-libre/super-tts-qwen-tts
+git clone https://github.com/super-libre/super-tts-qwen
 just build-release          # Vulkan, the default: needs nothing to build
 just build-cuda             # needs the CUDA headers — no GPU, no compute capability
 just build-rocm             # needs the ROCm headers

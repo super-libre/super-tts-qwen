@@ -72,7 +72,7 @@ impl ModelThread {
     pub fn spawn() -> Self {
         let (jobs, rx) = channel::<Job>();
         std::thread::Builder::new()
-            .name("qwen-tts-model".to_string())
+            .name("qwen-model".to_string())
             .spawn(move || {
                 let mut model: Option<QwenTts> = None;
                 let mut used = false;

@@ -5,11 +5,11 @@
 # from any parent workspace (own Cargo.lock).
 
 [package]
-    name = "super-tts-backend-qwen-tts"
+    name = "super-tts-backend-qwen"
     version = "0.1.0"
     edition = "2024"
     description = "Qwen text-to-speech backend for Super TTS."
-    repository = "https://github.com/super-libre/super-tts-qwen-tts"
+    repository = "https://github.com/super-libre/super-tts-qwen"
     license = "GPL-3.0-only"
     publish = false
 
@@ -18,7 +18,7 @@
 
 
 [[bin]]
-    name = "super-tts-backend-qwen-tts"
+    name = "super-tts-backend-qwen"
     path = "src/main.rs"
 
 [dependencies]
