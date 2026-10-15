@@ -169,7 +169,7 @@ fn bf16_to_f16(data: &TensorData) -> TensorData {
             });
         }
     });
-    TensorData::new(out, data.shape.clone())
+    TensorData::new(out, data.shape().clone())
 }
 
 /// Loads the PyTorch checkpoints into modules built with [`linear_config`].
@@ -277,7 +277,7 @@ mod tests {
         let data = TensorData::new(values, [4, 65_536]);
         let ours = bf16_to_f16(&data);
         let burns = data.convert_dtype(DType::F16);
-        assert_eq!(ours.shape, burns.shape);
+        assert_eq!(ours.shape(), burns.shape());
         let ours = ours.as_slice::<f16>().unwrap();
         let burns = burns.as_slice::<f16>().unwrap();
         for (i, (a, b)) in ours.iter().zip(burns).enumerate() {
