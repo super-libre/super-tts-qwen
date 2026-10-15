@@ -141,7 +141,7 @@ jobs:
           fi
           "$build" build --release --locked --target ${{ matrix.target }} \
             --no-default-features --features "${{ matrix.features }}" \
-            --bin super-tts-backend-qwen-tts
+            --bin super-tts-backend-qwen
 
       # `COPYFILE_DISABLE` stops macOS's bsdtar adding an AppleDouble `._`
       # entry for any file carrying extended attributes. GNU tar ignores it.
@@ -149,14 +149,14 @@ jobs:
         env:
           COPYFILE_DISABLE: "1"
         run: |
-          tar -czf "qwen-tts-${{ matrix.target }}-${{ matrix.suffix }}.tar.gz" \
-            -C "target/${{ matrix.target }}/release" super-tts-backend-qwen-tts
-          ls -lh qwen-tts-*.tar.gz
+          tar -czf "qwen-${{ matrix.target }}-${{ matrix.suffix }}.tar.gz" \
+            -C "target/${{ matrix.target }}/release" super-tts-backend-qwen
+          ls -lh qwen-*.tar.gz
 
       - uses: actions/upload-artifact@v7
         with:
-          name: qwen-tts-${{ matrix.target }}-${{ matrix.suffix }}
-          path: qwen-tts-${{ matrix.target }}-${{ matrix.suffix }}.tar.gz
+          name: qwen-${{ matrix.target }}-${{ matrix.suffix }}
+          path: qwen-${{ matrix.target }}-${{ matrix.suffix }}.tar.gz
 
   create-release:
     name: Create Release

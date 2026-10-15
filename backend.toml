@@ -12,12 +12,12 @@
 # beyond the one they load.
 
 [backend]
-    id = "app.super-tts.qwen-tts"
-    source = "github.com/super-libre/super-tts-qwen-tts"
-    name = "Qwen TTS"
+    id = "app.super-tts.qwen"
+    source = "github.com/super-libre/super-tts-qwen"
+    name = "Qwen"
     version = "0.1.0"
     kind = "subprocess"
-    entrypoint = "super-tts-backend-qwen-tts"
+    entrypoint = "super-tts-backend-qwen"
     contract = "v1"
     license = "GPL-3.0-only"
     description = "Qwen local text-to-speech, 24 kHz, 10 languages. Serves the Qwen3-TTS checkpoints: nine preset voices, or a voice built from a description."
@@ -75,7 +75,7 @@
 # CUDA major version, which decides the API the binary was built against.
 
 [[assets.subprocess]]
-    file = "qwen-tts-x86_64-unknown-linux-gnu-cuda12.tar.gz"
+    file = "qwen-x86_64-unknown-linux-gnu-cuda12.tar.gz"
     target = "x86_64-unknown-linux-gnu"
     accel = "cuda"
     cuda_major = 12
@@ -83,7 +83,7 @@
     # build matches any compute capability, which is what omitting it declares.
 
 [[assets.subprocess]]
-    file = "qwen-tts-x86_64-unknown-linux-gnu-cuda13.tar.gz"
+    file = "qwen-x86_64-unknown-linux-gnu-cuda13.tar.gz"
     target = "x86_64-unknown-linux-gnu"
     accel = "cuda"
     cuda_major = 13
@@ -95,7 +95,7 @@
 # and the CDNA parts; a card outside it will usually work and is simply not
 # advertised.
 [[assets.subprocess]]
-    file = "qwen-tts-x86_64-unknown-linux-gnu-rocm.tar.gz"
+    file = "qwen-x86_64-unknown-linux-gnu-rocm.tar.gz"
     target = "x86_64-unknown-linux-gnu"
     accel = "rocm"
     gfx = [
@@ -118,7 +118,7 @@
 # subgroup types that needs are core in Vulkan 1.2 (CubeCL reaches for
 # `VK_KHR_shader_subgroup_extended_types` below it).
 [[assets.subprocess]]
-    file = "qwen-tts-x86_64-unknown-linux-gnu-vulkan.tar.gz"
+    file = "qwen-x86_64-unknown-linux-gnu-vulkan.tar.gz"
     target = "x86_64-unknown-linux-gnu"
     accel = "vulkan"
     vulkan_api = "1.2"
@@ -126,7 +126,7 @@
 # macOS on Apple Silicon. Metal compiles its kernels at runtime like the other
 # GPU builds, so it has nothing to select on beyond the target.
 [[assets.subprocess]]
-    file = "qwen-tts-aarch64-apple-darwin-metal.tar.gz"
+    file = "qwen-aarch64-apple-darwin-metal.tar.gz"
     target = "aarch64-apple-darwin"
     accel = "metal"
 

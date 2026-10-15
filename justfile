@@ -55,8 +55,8 @@ build-metal *args:
 #
 # Build and stage the binary for Import-from-dir. Usage: just stage [args]
 stage *args: (build-release args)
-    cp target/release/super-tts-backend-qwen-tts super-tts-backend-qwen-tts
-    @echo "staged super-tts-backend-qwen-tts — this directory is now installable with Import from dir"
+    cp target/release/super-tts-backend-qwen super-tts-backend-qwen
+    @echo "staged super-tts-backend-qwen — this directory is now installable with Import from dir"
 
 # Remove build output.
 clean:
@@ -69,7 +69,7 @@ clean:
 #
 # Remove build output and every generated artifact in the tree.
 clean-all: clean
-    rm -f super-tts-backend-qwen-tts lcov.info *.profraw *.profdata
+    rm -f super-tts-backend-qwen lcov.info *.profraw *.profdata
 
 # Runs a clippy check — mirrors super-tts's lint. Twice: the default Vulkan
 # build, and the `flex` one the tests run on, whose device arm only it compiles.
