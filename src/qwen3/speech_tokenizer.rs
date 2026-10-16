@@ -1134,6 +1134,22 @@ pub struct SpeechTokenizerModel {
     encoder: Option<Encoder>,
 }
 
+impl SpeechTokenizerModel {
+    fn init(
+        cfg: &SpeechTokenizerConfig,
+        device: &Device,
+        with_encoder: bool,
+    ) -> Result<Self, String> {
+        let encoder = with_encoder
+            .then(|| Encoder::init(cfg, device))
+            .transpose()?;
+        Ok(Self {
+            decoder: Decoder::init(&cfg.decoder_config, device),
+            encoder,
+        })
+    }
+}
+
 /// The frames of a window of `window` that go through the decoder's stack after the
 /// transformer, which reaches `reach` frames back, when the frames from `context` on are kept,
 /// at most `chunk` of them.
@@ -1214,16 +1230,9 @@ impl SpeechTokenizer {
         with_encoder: bool,
         read: &Arc<AtomicU64>,
     ) -> Result<Self, String> {
-        let decoder_cfg = &cfg.decoder_config;
         // In the persistent pool, as the talker's are: see `Qwen3Tts::load`.
         let (model, result) = device.memory_persistent_allocations((), |()| {
-            let encoder = with_encoder
-                .then(|| Encoder::init(cfg, device))
-                .transpose()?;
-            let mut model = SpeechTokenizerModel {
-                decoder: Decoder::init(decoder_cfg, device),
-                encoder,
-            };
+            let mut model = SpeechTokenizerModel::init(cfg, device, with_encoder)?;
             let mut store = SafetensorsStore::from_file(weights)
                 .with_from_adapter(
                     crate::qwen3::ReadCounter(Arc::clone(read))
@@ -1237,16 +1246,37 @@ impl SpeechTokenizer {
             Ok::<_, String>((model, result))
         })?;
         crate::qwen3::check_apply_result("speech tokenizer", &result)?;
+        Ok(Self::assemble(cfg, model, device))
+    }
+
+    /// The codec `cfg` describes with every weight zero, the encoder included when
+    /// `with_encoder`: the shapes of a loaded one, in the f32 the checkpoints store it in, so
+    /// it runs the same kernels without them. Unlike [`load`](Self::load)'s, its weights live
+    /// in the pools a cleanup hands back to the device.
+    pub fn zeroed(
+        cfg: &SpeechTokenizerConfig,
+        device: &Device,
+        with_encoder: bool,
+    ) -> Result<Self, String> {
+        let model = SpeechTokenizerModel::init(cfg, device, with_encoder)?
+            .map(&mut crate::qwen3::Zeros { dtype: DType::F32 });
+        Ok(Self::assemble(cfg, model, device))
+    }
+
+    /// The codec around its weights, loaded or zeroed.
+    fn assemble(cfg: &SpeechTokenizerConfig, model: SpeechTokenizerModel, device: &Device) -> Self {
         let f32 = burn::tensor::DType::F32;
-        Ok(Self {
+        let encoder_state = model
+            .encoder
+            .is_some()
+            .then(|| TransformerState::new(&cfg.encoder_config.transformer_config(), f32, device));
+        Self {
             model,
-            state: TransformerState::new(&decoder_cfg.transformer_config(), f32, device),
-            encoder_state: with_encoder.then(|| {
-                TransformerState::new(&cfg.encoder_config.transformer_config(), f32, device)
-            }),
+            state: TransformerState::new(&cfg.decoder_config.transformer_config(), f32, device),
+            encoder_state,
             config: cfg.clone(),
             device: device.clone(),
-        })
+        }
     }
 
     /// Whether the encoder was loaded, see [`load_with_encoder`](Self::load_with_encoder).
