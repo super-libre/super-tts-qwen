@@ -18,6 +18,7 @@
     version = "0.1.0"
     kind = "subprocess"
     entrypoint = "super-tts-backend-qwen"
+    product = "super-tts"
     contract = "v1"
     license = "GPL-3.0-only"
     description = "Qwen local text-to-speech, 24 kHz, 10 languages. Serves the Qwen3-TTS checkpoints: nine preset voices, or a voice built from a description."
