@@ -175,4 +175,9 @@ is the process's, from `nvidia-smi`.
   `prepared` at once, from the marker.
 - **Shutdown.** None of the runs panicked at exit after `SIGTERM`. The backend
   installs no handler for it, so the process ends before anything is dropped.
-- **The 1.7B models.** They list `prepare_files` too, but none was measured.
+- **1.7B VoiceDesign.** Measured the same way on CUDA, the prepare took 362
+  seconds and wrote 2600 entries, and 0.5 GB was left at the handover. A load
+  after it was ready in 8.7 seconds, with phase `loading`. Its warm-up wrote 6
+  entries and took 2.7 seconds, and it peaked at 4.9 GB. A 27-second request
+  then took 4.9 seconds, with its first audio at 0.4. The other 1.7B models
+  share its shapes and were not run.
