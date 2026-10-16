@@ -7,9 +7,8 @@
 //! way that has nothing to do with their size. The codec encoder runs over the
 //! whole clip as one tensor, so every clip *length* is a shape `CubeCL` has not
 //! tuned yet, and tuning is the slow half of meeting any new shape: a first
-//! registration of a twenty-second clip can hold the request open for the
-//! better part of a minute, with the user's finger on a Preview button that
-//! looks broken.
+//! registration of a long clip holds the request open long enough that the
+//! Preview button the user pressed looks broken.
 //!
 //! What comes out the other side is tiny. At 12.5 frames a second and sixteen
 //! codes a frame, twenty seconds of reference is 4000 codes — around 17 KB

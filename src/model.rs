@@ -83,14 +83,12 @@ const WARM_UP_TEXT: &str = "\
 /// A ladder rather than one length, because `CubeCL` keys its autotune entries
 /// on the shape of the problem and the prefix pass takes its shape from the
 /// prompt. The entries are rounded, so one prompt covers a span of nearby
-/// lengths — but only a span. Measured on a cold cache with a single 300
-/// character warm-up, requests of 220 and 300 characters were fast while 140,
-/// 380 and 430 each stalled for seconds on their own first request, one of them
-/// generating at 2.7 frames per second for a whole utterance.
+/// lengths, but only a span: a request outside every rung's span pays for its
+/// own tuning on its first use, through the whole utterance.
 ///
 /// These five span the `max_input_chars` every model in the manifest declares.
-/// A request longer than the last of them pays its own tuning once, which is
-/// the same deal as before and now only reachable by raising that cap.
+/// A request longer than the last of them pays its own tuning once, which only
+/// raising that cap can reach.
 const WARM_UP_LENGTHS: [usize; 5] = [60, 150, 260, 370, 480];
 
 /// Frames the deep warm-up generates, when it runs at all.
@@ -99,11 +97,9 @@ const WARM_UP_LENGTHS: [usize; 5] = [60, 150, 260, 370, 480];
 /// depend on the *prompt*. It leaves one thing cold: the talker's key/value
 /// cache starts a few hundred positions past the prompt and doubles when a
 /// generation outgrows it, re-capturing the graph and tuning the wider shapes
-/// as it goes. Twenty-five frames never reach that, so the first real request
-/// did — one measured at 2.6 frames per second for a whole utterance, ten
-/// seconds of audio taking fifty-one to produce, with its time to first audio
-/// perfectly healthy because the cost was spread through the generation rather
-/// than sitting in front of it.
+/// as it goes. Twenty-five frames never reach that, so without this pass the
+/// first long request pays for it, spread through its generation rather than
+/// in front of it, where its time to first audio does not show it.
 ///
 /// Thirty seconds of speech, which is past the first doubling for every prompt
 /// length above.
@@ -148,10 +144,10 @@ fn warm_up_reference(sample_rate: u32, seconds: u32) -> Vec<f32> {
 ///
 /// The work the deep pass does is tuning, and tuning is kept on disk, so it is
 /// paid once per host and build rather than once per process — which is why it
-/// must not be paid on every load. The ladder itself is the probe: it takes a
-/// second or two against a warm cache and a minute or more against a cold one,
-/// so a slow ladder means this process is the one that would have handed the
-/// bill to the first request.
+/// must not be paid on every load. The ladder itself is the probe: it is quick
+/// against a warm cache and slow against a cold one, so a slow ladder means
+/// this process is the one that would have handed the bill to the first
+/// request.
 const DEEP_WARM_UP_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Frames decoded at a time while streaming: two seconds of audio.
@@ -168,13 +164,9 @@ const STREAM_CHUNK_FRAMES: usize = 25;
 /// [`SpeechTokenizer::decode_context_frames`], 580 frames for the 12 Hz codec,
 /// since its eight windowed attention layers compound — and carrying all of it
 /// would decode 24 frames for every one heard. Most of it buys nothing
-/// audible. Measured on the 12 Hz codec against a whole decode of the same
-/// codes, the stream matches it to 37 dB behind 73 frames (one window, what
-/// this replaced) and to 65 dB behind 150, and 60 dB is where the decoder's
-/// own arithmetic noise sits: its f32 matmuls run on tensor cores at TF32,
-/// and a whole decode is 60 dB from the fp32 reference for that alone. So 150
-/// puts the seams under the noise, at 1.8x the decode work of 73; every frame
-/// past it is paid for and not heard.
+/// audible: behind 150 frames the seams already sit under the decoder's own
+/// arithmetic noise, so every frame past it is paid for and not heard. The
+/// measurement is in `docs/port-notes.md`.
 const STREAM_CONTEXT_FRAMES: usize = 150;
 
 /// A seed for one request's sampling, drawn from the process's entropy.
@@ -396,6 +388,9 @@ pub struct QwenTts {
     /// the one that reads them back.
     device: Device,
     dtype: DType,
+    /// Whether the weights are zeros, as a kernel build makes them: nothing it
+    /// derives is kept, since it describes no checkpoint.
+    zeroed: bool,
 }
 
 // The model has no `Debug` worth printing and `Tokenizer` has none at all, so
@@ -420,6 +415,7 @@ impl std::fmt::Debug for QwenTts {
             .field("model_name", &self.model_name)
             .field("device", &self.device)
             .field("dtype", &self.dtype)
+            .field("zeroed", &self.zeroed)
             .finish()
     }
 }
@@ -459,12 +455,10 @@ const ON_GPU: bool = cfg!(any(
 const BUILDS_KERNELS: bool = ON_GPU;
 
 /// The entries a first load's warm-up writes to the kernel cache, tuning
-/// results and compiled kernels both: 2615 on CUDA and 1409 on Vulkan, measured
-/// on an empty cache with the 1.7B CustomVoice checkpoint on an RTX 3090 (the
-/// 0.6B writes as many), 1226 on ROCm with 0.6B CustomVoice on an AMD BC-250
-/// (gfx1013, which has no matrix units: a card that has them tunes more
-/// candidates), and 822 on Metal with 0.6B CustomVoice on an Apple M2. The
-/// generic `wgpu` is taken to be Vulkan, unmeasured. Only the pace of the bar
+/// results and compiled kernels both, on each accelerator from an empty cache;
+/// a kernel build writes as many. Where they were counted is in
+/// `docs/port-notes.md`. The generic `wgpu` is taken to be Vulkan. A card that
+/// tunes more candidates writes more. Only the pace of the bar
 /// rides on it: past the estimate it slows down short of the end rather than
 /// stopping, see `progress::estimate`, and a checkpoint that writes fewer ends
 /// its step early.
@@ -479,6 +473,11 @@ const WARM_UP_CACHE_ENTRIES: u64 = if !BUILDS_KERNELS {
 } else {
     2615
 };
+
+/// Layers of the talker, and of its code predictor, that a kernel build keeps,
+/// see [`QwenTts::build_kernels`]: two, so that what runs between one layer and
+/// the next is there too.
+const BUILD_LAYERS: usize = 2;
 
 /// The units of work a warm-up in `phase` is expected to do, which is what
 /// its progress is measured against: the entries it writes to the kernel
@@ -502,16 +501,13 @@ fn warm_up_work(phase: Phase) -> u64 {
 /// bf16 is what the checkpoints were trained in, and CUDA gets it. Nothing
 /// else does, whatever the device reports, because CubeCL cannot compile it
 /// there. On Vulkan the SPIR-V extension for bf16 allows no arithmetic on it,
-/// yet CubeCL emits some, and NVIDIA's driver crashes compiling it. On ROCm
-/// CubeCL compiles through LLVM, and its lowering has no bf16 type at all: an
-/// RDNA1 card that reports bf16 failed every kernel with "Type cube.bf16 does
-/// not have a conversion to LLVM type implemented", and nothing in the
-/// lowering depends on the card. Metal's backend reports no bf16.
+/// yet CubeCL emits some. On ROCm CubeCL compiles through LLVM, and its
+/// lowering has no bf16 type at all, whatever the card. Metal's backend reports
+/// no bf16.
 ///
-/// Those get f16 instead. It holds the talker: the largest value of a 1.7B
-/// prefill, the product inside the MLP of its third layer, is 9.6e3 of the
-/// 6.5e4 f16 reaches, and on Vulkan the speech ends where it should. A device
-/// that computes in neither type gets f32.
+/// Those get f16 instead, whose range holds the talker's activations. A device
+/// that computes in neither type gets f32. The evidence for both is in
+/// `docs/port-notes.md`.
 fn talker_dtype(device: &Device) -> DType {
     let half = if BUILT_FOR == "cuda" {
         DType::BF16
@@ -631,11 +627,11 @@ pub fn configure_kernel_cache(cache_dir: Option<&Path>) {
 /// Where `CubeCL` keeps this backend's kernels, when the daemon grants a place.
 static CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-/// Where a load records that `model` finished a warm-up with this build, so
-/// that the next load of it is not an initial setup. It sits beside the
-/// kernels it vouches for, so clearing the cache clears it too. Without a
-/// cache directory there is none, and every load is an initial setup, since
-/// every load compiles everything.
+/// Where a load or a kernel build records that `model` finished a warm-up with
+/// this build, so that the next load of it is not an initial setup. It sits
+/// beside the kernels it vouches for, so clearing the cache clears it too.
+/// Without a cache directory there is none, and every load is an initial
+/// setup, since every load compiles everything.
 ///
 /// Named by the binary's build ID, which is what `CubeCL` keys its compiled
 /// kernels on: any rebuild, a release that keeps its version included,
@@ -656,6 +652,51 @@ fn warm_marker(model: &str) -> Option<PathBuf> {
         dir.join("qwen-warm")
             .join(format!("{model}-{BUILT_FOR}-{build}"))
     })
+}
+
+/// Writes `marker`, if there is one, recording a finished warm-up.
+fn mark_warm(marker: Option<&Path>) {
+    let Some(marker) = marker else {
+        return;
+    };
+    let written = marker
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(marker, b""));
+    if let Err(e) = written {
+        log::warn!("could not mark {} warm: {e}", marker.display());
+    }
+}
+
+/// A checkpoint as its two configuration files describe it: everything about
+/// it but its weights and its tokenizer.
+struct Checkpoint {
+    config: Config,
+    speech_tokenizer: SpeechTokenizerConfig,
+    kind: Kind,
+}
+
+impl Checkpoint {
+    fn read(dir: &Path) -> Result<Self> {
+        let config_file = model_file(dir, "config.json")?;
+        let st_config_file = model_file(dir, "speech_tokenizer/config.json")?;
+        let config: Config = serde_json::from_slice(&std::fs::read(&config_file)?)
+            .with_context(|| format!("parsing {}", config_file.display()))?;
+        let speech_tokenizer: SpeechTokenizerConfig =
+            serde_json::from_slice(&std::fs::read(&st_config_file)?)
+                .with_context(|| format!("parsing {}", st_config_file.display()))?;
+        let kind = Kind::parse(&config.tts_model_type)?;
+        Ok(Self {
+            config,
+            speech_tokenizer,
+            kind,
+        })
+    }
+}
+
+fn read_tokenizer(dir: &Path) -> Result<Tokenizer> {
+    let file = model_file(dir, "tokenizer.json")?;
+    Tokenizer::from_file(&file).map_err(|e| anyhow!("loading {}: {e}", file.display()))
 }
 
 /// The one file layout this backend and its manifest agree on.
@@ -721,16 +762,110 @@ impl QwenTts {
             model.release_memory();
             anyhow::Ok((model, warmed))
         })?;
-        if warmed && let Some(marker) = marker {
-            let written = marker
-                .parent()
-                .map_or(Ok(()), std::fs::create_dir_all)
-                .and_then(|()| std::fs::write(&marker, b""));
-            if let Err(e) = written {
-                log::warn!("could not mark {} warm: {e}", marker.display());
-            }
+        if warmed {
+            mark_warm(marker.as_deref());
         }
         Ok(model)
+    }
+
+    /// Compile and tune the kernels a load of `model_name` needs, from its
+    /// configuration files and its tokenizer alone, so that they can be built
+    /// while its weights are still on their way.
+    ///
+    /// The kernels depend on the shapes, dtypes and layouts the model runs at,
+    /// not on its weights, so this runs the load's warm-up on a model whose
+    /// weights are zeros. Every layer of the talker runs the same kernels at the
+    /// same shapes, and so does every layer of the code predictor, so it keeps
+    /// [`BUILD_LAYERS`] of each. The codec keeps all of its layers: how many it
+    /// stacks sets how much context a streamed decode carries, and so the shape
+    /// of every decode. A later load of the model then finds the kernels cached
+    /// and is not an initial setup. The memory is handed back before this
+    /// returns, so the load that follows has the device to itself.
+    ///
+    /// A build without kernels to compile reads the files and stops there.
+    ///
+    /// # Errors
+    /// Returns an error if a file it reads is missing or malformed, the
+    /// checkpoint is of a family this backend does not serve, or the warm-up
+    /// does not run to the end.
+    pub fn build_kernels(
+        backend_dir: &Path,
+        model_name: &str,
+        device: Option<&str>,
+        report: &(dyn Fn(Report) + Sync),
+    ) -> Result<()> {
+        let dir = backend_dir.join("models").join(model_name);
+        let mut checkpoint = Checkpoint::read(&dir)?;
+        let tokenizer = read_tokenizer(&dir)?;
+        if !BUILDS_KERNELS {
+            return Ok(());
+        }
+        let talker = &mut checkpoint.config.talker_config;
+        talker.num_hidden_layers = talker.num_hidden_layers.min(BUILD_LAYERS);
+        let predictor = &mut talker.code_predictor_config;
+        predictor.num_hidden_layers = predictor.num_hidden_layers.min(BUILD_LAYERS);
+
+        let (device, device_name) = select_device(device);
+        let dtype = talker_dtype(&device);
+        log::info!(
+            "building the kernels of {model_name} on {device_name} ({dtype:?}) from {}",
+            dir.display()
+        );
+        let tracker = Tracker::new(Phase::InitialSetup, report);
+        let warmed = std::thread::scope(|scope| {
+            scope.spawn(|| tracker.run());
+            let _finish = Finish(&tracker);
+            let frames = Arc::new(AtomicU64::new(0));
+            let entries = crate::progress::cache_entries();
+            tracker.enter(
+                Step::BuildingKernels,
+                Measure::warm_up(Arc::clone(&frames), warm_up_work(Phase::InitialSetup)),
+            );
+            let talker = Talker::zeroed(&checkpoint.config, dtype, &device)
+                .map_err(|e| anyhow!("building a zeroed talker: {e}"))?;
+            let speech_tokenizer = SpeechTokenizer::zeroed(
+                &checkpoint.speech_tokenizer,
+                &device,
+                checkpoint.kind == Kind::Base,
+            )
+            .map_err(|e| anyhow!("building a zeroed codec: {e}"))?;
+            let mut model = Self::assemble(
+                &checkpoint,
+                talker,
+                speech_tokenizer,
+                tokenizer,
+                model_name,
+                (device.clone(), device_name),
+                dtype,
+            )?;
+            model.zeroed = true;
+            let warmed = model.warm_up(&frames);
+            log::info!(
+                "the kernel build wrote {} kernel-cache entries and generated {} frames, \
+                 against {} units expected",
+                crate::progress::cache_entries().saturating_sub(entries),
+                frames.load(Ordering::Relaxed),
+                warm_up_work(Phase::InitialSetup)
+            );
+            anyhow::Ok(warmed)
+        });
+        // The model is gone by now, so this hands back all of it.
+        device.memory_cleanup();
+        if let Err(e) = device.sync() {
+            log::warn!("syncing the device after building the kernels failed: {e}");
+        }
+        if !warmed? {
+            bail!("the warm-up did not run to the end");
+        }
+        mark_warm(warm_marker(model_name).as_deref());
+        Ok(())
+    }
+
+    /// Whether a load of `model_name` would find its kernels built by this
+    /// build. Never, on a build without kernels to compile.
+    #[must_use]
+    pub fn kernels_built(model_name: &str) -> bool {
+        BUILDS_KERNELS && warm_marker(model_name).is_some_and(|marker| marker.exists())
     }
 
     /// The part of [`Self::load`] before the warm-up, under its tracker.
@@ -742,21 +877,9 @@ impl QwenTts {
         tracker: &Tracker<'_>,
     ) -> Result<Self> {
         let dir = backend_dir.join("models").join(model_name);
-        let config_file = model_file(&dir, "config.json")?;
+        let checkpoint = Checkpoint::read(&dir)?;
         let weights_file = model_file(&dir, "model.safetensors")?;
-        let st_config_file = model_file(&dir, "speech_tokenizer/config.json")?;
         let st_weights_file = model_file(&dir, "speech_tokenizer/model.safetensors")?;
-        let tokenizer_file = model_file(&dir, "tokenizer.json")?;
-
-        let config: Config = serde_json::from_slice(&std::fs::read(&config_file)?)
-            .with_context(|| format!("parsing {}", config_file.display()))?;
-        let st_config: SpeechTokenizerConfig =
-            serde_json::from_slice(&std::fs::read(&st_config_file)?)
-                .with_context(|| format!("parsing {}", st_config_file.display()))?;
-        let kind = Kind::parse(&config.tts_model_type)?;
-        // The 0.6B checkpoints were not trained on instructions; the reference
-        // implementation drops them, and so does this.
-        let ignores_instructions = config.tts_model_size == "0b6";
 
         let (device, device_name) = select_device(device);
         let dtype = talker_dtype(&device);
@@ -778,11 +901,61 @@ impl QwenTts {
             },
         );
 
-        let tokenizer = Tokenizer::from_file(&tokenizer_file)
-            .map_err(|e| anyhow!("loading {}: {e}", tokenizer_file.display()))?;
+        let tokenizer = read_tokenizer(&dir)?;
 
-        let mut talker = Talker::load(&config, &weights_file, dtype, &device, &read)
+        let talker = Talker::load(&checkpoint.config, &weights_file, dtype, &device, &read)
             .map_err(|e| anyhow!("building the talker from {}: {e}", weights_file.display()))?;
+
+        // The codec runs in f32 whatever the talker's dtype: it is a small part
+        // of the compute and the decoder is where audible artefacts would show.
+        // Its convolutions are the exception on Vulkan, see `assemble`.
+        //
+        // The Base checkpoints also need the codec's *encoder*, to turn a
+        // cloning reference into the codes an in-context example is made of.
+        // Only they: it is weights and load time no other family would use.
+        let st_config = &checkpoint.speech_tokenizer;
+        let speech_tokenizer = if checkpoint.kind == Kind::Base {
+            SpeechTokenizer::load_with_encoder(st_config, &st_weights_file, &device, &read)
+        } else {
+            SpeechTokenizer::load(st_config, &st_weights_file, &device, &read)
+        }
+        .map_err(|e| anyhow!("building the codec from {}: {e}", st_weights_file.display()))?;
+
+        let model = Self::assemble(
+            &checkpoint,
+            talker,
+            speech_tokenizer,
+            tokenizer,
+            model_name,
+            (device, device_name),
+            dtype,
+        )?;
+        log::info!(
+            "loaded: {:?}, {} speakers, {} languages, {} Hz, {} frames/s",
+            model.kind,
+            model.speakers.len(),
+            model.talker.supported_languages().len(),
+            model.sample_rate,
+            model.frames_per_second
+        );
+        Ok(model)
+    }
+
+    /// The model around a talker and a codec, loaded or zeroed: what
+    /// [`Self::load`] and [`Self::build_kernels`] both run.
+    fn assemble(
+        checkpoint: &Checkpoint,
+        mut talker: Talker,
+        mut speech_tokenizer: SpeechTokenizer,
+        tokenizer: Tokenizer,
+        model_name: &str,
+        (device, device_name): (Device, &'static str),
+        dtype: DType,
+    ) -> Result<Self> {
+        let kind = checkpoint.kind;
+        // The 0.6B checkpoints were not trained on instructions; the reference
+        // implementation drops them, and so does this.
+        let ignores_instructions = checkpoint.config.tts_model_size == "0b6";
         // Replay the forward passes as captured graphs instead of walking the
         // operations again per frame: one driver call per pass rather than a
         // few hundred, which is most of the difference between this backend and
@@ -790,20 +963,6 @@ impl QwenTts {
         // capture, so it is safe to ask for unconditionally.
         talker.enable_talker_graphs();
         talker.enable_code_predictor_graphs();
-
-        // The codec runs in f32 whatever the talker's dtype: it is a small part
-        // of the compute and the decoder is where audible artefacts would show.
-        // Its convolutions are the exception on Vulkan, see below.
-        //
-        // The Base checkpoints also need the codec's *encoder*, to turn a
-        // cloning reference into the codes an in-context example is made of.
-        // Only they: it is weights and load time no other family would use.
-        let mut speech_tokenizer = if kind == Kind::Base {
-            SpeechTokenizer::load_with_encoder(&st_config, &st_weights_file, &device, &read)
-        } else {
-            SpeechTokenizer::load(&st_config, &st_weights_file, &device, &read)
-        }
-        .map_err(|e| anyhow!("building the codec from {}: {e}", st_weights_file.display()))?;
         // On Vulkan the decoder's convolutions run in f16 as the talker does,
         // or the codec alone runs slower than real time. See
         // `SpeechTokenizer::convolve_in` for what that costs.
@@ -844,13 +1003,7 @@ impl QwenTts {
         #[allow(clippy::cast_precision_loss)]
         let frames_per_second = f64::from(sample_rate) / samples_per_frame as f64;
 
-        log::info!(
-            "loaded: {kind:?}, {} speakers, {} languages, {sample_rate} Hz, \
-             {frames_per_second} frames/s",
-            speakers.len(),
-            talker.supported_languages().len()
-        );
-        let model = Self {
+        Ok(Self {
             talker,
             speech_tokenizer,
             tokenizer,
@@ -865,8 +1018,8 @@ impl QwenTts {
             model_name: model_name.to_string(),
             device,
             dtype,
-        };
-        Ok(model)
+            zeroed: false,
+        })
     }
 
     /// The rate of the audio this model produces, in Hz.
@@ -884,10 +1037,9 @@ impl QwenTts {
     /// exact-fit, and nothing here touches them; the f32 convolution weights
     /// that `convolve_in` replaced with f16 copies are freed with the rest.
     ///
-    /// Not after every request: a request grows its working memory back, about
-    /// 0.6 GB for 0.6B on an RTX 3090, and keeps it for the next. Releasing it
-    /// after each one would make every sentence of an utterance allocate it
-    /// again.
+    /// Not after every request: a request grows its working memory back and
+    /// keeps it for the next. Releasing it after each one would make every
+    /// sentence of an utterance allocate it again.
     ///
     /// Synced after. On CUDA the pages are freed in stream order, into the
     /// driver's own pool, which hands them back to the system only at the next
@@ -915,12 +1067,9 @@ impl QwenTts {
     /// ask for, already resolved by [`voices::configured`]. It is the wording
     /// behind one voice id — [`voices::CUSTOM_VOICE_ID`] — and reaches nothing
     /// else: a request naming another design gets that design, and one naming
-    /// no voice at all gets the default. It used to fill in for any request
-    /// that named none, which was right while the option was the only way to
-    /// choose and became a lie the moment the designs were voices: the daemon
-    /// sends no voice when the user has stored no preference, so a typed
-    /// description would have overridden the "· default" the picker was
-    /// showing them.
+    /// no voice at all gets the default, not this: the daemon sends no voice
+    /// when the user has stored no preference, so a typed description filling
+    /// in would override the "· default" the picker is showing them.
     ///
     /// # Errors
     /// Returns [`RequestError`] when the voice or language is not one this
@@ -1074,12 +1223,17 @@ impl QwenTts {
         // meets the whole clip as one tensor, so every clip length is a shape
         // CubeCL has to autotune, and tuning is the slow part of meeting a new
         // shape. What it produces is a few tens of kilobytes.
-        let cache = crate::voice_cache::dir().map(|dir| {
-            (
-                dir,
-                crate::voice_cache::key(&self.model_name, transcript, samples),
-            )
-        });
+        //
+        // Not for a zeroed model: its embedding would be zeros, filed under the
+        // checkpoint whose weights it does not have.
+        let cache = crate::voice_cache::dir()
+            .filter(|_| !self.zeroed)
+            .map(|dir| {
+                (
+                    dir,
+                    crate::voice_cache::key(&self.model_name, transcript, samples),
+                )
+            });
         if let Some((dir, key)) = cache.as_ref()
             && let Some(derived) = crate::voice_cache::load(dir, key)
         {
@@ -1125,9 +1279,8 @@ impl QwenTts {
             None => None,
         };
         // Both halves timed separately: the first registration of a clip length
-        // can run for the better part of a minute, and which half it was spent
-        // in is the difference between tuning the speaker encoder and tuning
-        // the codec.
+        // is slow, and which half the time went to is the difference between
+        // tuning the speaker encoder and tuning the codec.
         log::info!(
             "registered the voice {uuid} from {seconds:.1}s of audio{} in {:.1?} \
              (embedding {embedded:.1?})",
@@ -1193,9 +1346,8 @@ impl QwenTts {
     ///
     /// CubeCL compiles every GPU kernel the first time it meets one and tunes
     /// each operation against its candidates. On a cold cache that is minutes,
-    /// not seconds — measured at over six on an RTX 3090 — and it would
-    /// otherwise all land on whoever sends the first request, after
-    /// `GET /v1/status` has already said `ready`. Two seconds of speech are
+    /// not seconds, and it would otherwise all land on whoever sends the first
+    /// request, after `GET /v1/status` has already said `ready`. Two seconds of speech are
     /// generated and thrown away here instead, which walks the talker, the code
     /// predictor, the sampler and the codec decoder, so the work happens while
     /// the daemon is still showing its loading indicator.
@@ -1205,11 +1357,10 @@ impl QwenTts {
     /// shape of the problem, and the prefix pass — one forward over the whole
     /// prompt, before any frame is generated — has a shape that comes from the
     /// prompt's length. Warming up on `"Hello."` tunes a shape no real request
-    /// has, and the first real one then stalls before its first sound: 35
-    /// seconds, measured, against the 0.4 it takes once the shape is known.
+    /// has, and the first real one then stalls before its first sound.
     ///
     /// Everything it costs is paid once per build and device: the second run
-    /// reads the cache the daemon granted and this returns in about a second.
+    /// reads the cache the daemon granted and this returns quickly.
     ///
     /// A failure here is logged and swallowed. The model is loaded and usable;
     /// refusing the load over a warm-up would turn a slow first request into no
@@ -1439,9 +1590,9 @@ impl QwenTts {
 /// single decode of both would have produced. The decoder says how many frames
 /// make that exact — [`SpeechTokenizer::decode_context_frames`] — and it is
 /// more than a stream can afford to re-decode with every chunk, so the stream
-/// carries [`STREAM_CONTEXT_FRAMES`] of it, a figure set by measuring the seams
-/// against a whole decode rather than by ear: short of it, the loss sits at
-/// every seam past the first and nowhere else. Every decode goes through one
+/// carries [`STREAM_CONTEXT_FRAMES`] of it, a figure set against a whole
+/// decode rather than by ear: short of it, the loss sits at every seam past the
+/// first and nowhere else. Every decode goes through one
 /// window of [`Self::window_frames`], short chunks padded up to it, so the
 /// decoder is compiled and tuned for a single shape.
 struct ChunkDecoder<'a> {
@@ -1718,12 +1869,10 @@ mod tests {
         assert_eq!(decode_span(400, 425, 150), (150, 175));
     }
 
-    /// Two figures this replaced, each wrong the same way: a hand-picked 50,
-    /// then the decoder's own 73, which counted one attention window where its
-    /// eight compound. Both left every chunk past the first without most of
-    /// its history, a loss that starts at the first seam and never recovers.
-    /// The decoder now states the exact figure and the stream carries what it
-    /// asks for, up to the measured budget.
+    /// The stream carries the context the decoder asks for, up to the budget.
+    /// A figure short of the decoder's own leaves every chunk past the first
+    /// without most of its history, a loss that starts at the first seam and
+    /// never recovers.
     #[test]
     fn the_stream_carries_the_decoders_context_up_to_the_budget() {
         assert_eq!(stream_context_frames(Some(73)), 73);
@@ -1753,9 +1902,8 @@ mod tests {
     /// ```
     ///
     /// `codes.bin` is what the talker generates, frame-major little-endian
-    /// `u32`, `num_code_groups` to a frame. Measured 2026-09-21 on 239 frames
-    /// of the 1.7B base checkpoint: 65 dB behind [`STREAM_CONTEXT_FRAMES`],
-    /// 37 dB behind the 73 it replaced.
+    /// `u32`, `num_code_groups` to a frame. What it printed is in
+    /// `docs/port-notes.md`.
     #[test]
     #[ignore = "needs a checkpoint, a GPU and a file of codes; see the doc comment"]
     fn a_streamed_decode_matches_a_whole_decode() {
@@ -1829,7 +1977,8 @@ mod tests {
             "the stream is {snr:.1} dB from a whole decode; 60 is the decoder's own noise"
         );
 
-        // What the window costs against the 98-frame one this replaced, warm.
+        // What the window costs, warm, against one carrying 73 frames of
+        // context.
         let mut time = |window: usize| {
             let context = window - STREAM_CHUNK_FRAMES;
             let prefix = &codes[..window * groups];
@@ -2069,8 +2218,8 @@ mod voice_resolution_tests {
         }
     }
 
-    /// The point of the change: Custom is a declared voice id whose wording
-    /// comes from the option, so picking it is what reaches the field.
+    /// Custom is a declared voice id whose wording comes from the option, so
+    /// picking it is what reaches the field.
     #[test]
     fn custom_speaks_the_configured_description() {
         let got = resolve(

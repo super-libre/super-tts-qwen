@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use crate::frames;
 use crate::model::{Outcome, Prepared, QwenTts, RequestError};
 use crate::model_thread::ModelThread;
-use crate::progress::Report;
+use crate::progress::{Phase, Report};
 use crate::voices::{self, Requested};
 
 /// Where the model is in its lifecycle, as `GET /v1/status` reports it.
@@ -25,6 +25,10 @@ use crate::voices::{self, Requested};
 enum LoadState {
     /// Serving, but no model has been asked for yet.
     Starting,
+    /// A `POST /v1/prepare` is building the kernels, and has got as far as this.
+    Preparing(Report),
+    /// The kernels a load needs are built; no model is loaded yet.
+    Prepared,
     /// A `POST /v1/load` is in flight, and has got as far as this.
     Loading(Report),
     /// Ready to synthesize.
@@ -38,7 +42,7 @@ pub struct AppState {
     backend_dir: PathBuf,
     /// The model, which lives on a thread of its own because it is not `Send`.
     /// Every use of it is a job sent there, and jobs run one at a time — the
-    /// serialization a mutex used to provide.
+    /// serialization a mutex would provide.
     model: ModelThread,
     state: RwLock<LoadState>,
     /// Set by `POST /v1/cancel`, cleared at the start of each synthesis.
@@ -65,12 +69,25 @@ impl AppState {
         *guard = next;
     }
 
-    /// Record how far a load has got, unless it is over: a sample the sampler
-    /// took just before the load ended must not turn the state back.
+    /// Record how far a prepare or a load has got, unless it is over: a sample
+    /// the sampler took just before it ended must not turn the state back.
     fn report(&self, report: Report) {
         let mut guard = self.state.write().unwrap_or_else(PoisonError::into_inner);
-        if let LoadState::Loading(current) = &mut *guard {
+        if let LoadState::Preparing(current) | LoadState::Loading(current) = &mut *guard {
             *current = report;
+        }
+    }
+
+    /// End a prepare: `prepared` if it `built` the kernels, back to `starting`
+    /// if not. A load sent meanwhile owns the state by now, and keeps it.
+    fn end_prepare(&self, built: bool) {
+        let mut guard = self.state.write().unwrap_or_else(PoisonError::into_inner);
+        if matches!(*guard, LoadState::Preparing(_)) {
+            *guard = if built {
+                LoadState::Prepared
+            } else {
+                LoadState::Starting
+            };
         }
     }
 
@@ -87,6 +104,7 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
     axum::Router::new()
         .route("/v1/ping", get(ping))
         .route("/v1/status", get(status))
+        .route("/v1/prepare", post(prepare))
         .route("/v1/load", post(load))
         .route("/v1/synthesize", post(synthesize))
         .route("/v1/cancel", post(cancel))
@@ -106,19 +124,9 @@ async fn ping() -> Json<Value> {
 async fn status(State(s): State<Arc<AppState>>) -> Json<Value> {
     Json(match s.state() {
         LoadState::Starting => json!({ "status": "success", "state": "starting" }),
-        LoadState::Loading(report) => {
-            let mut out = json!({ "status": "success", "state": "loading" });
-            if let Some(phase) = report.phase {
-                out["phase"] = json!(phase.as_str());
-            }
-            if let Some(step) = report.step {
-                out["step"] = json!(step.as_str());
-            }
-            if let Some(progress) = report.progress {
-                out["progress"] = json!(progress);
-            }
-            out
-        }
+        LoadState::Preparing(report) => with_progress("preparing", report),
+        LoadState::Prepared => json!({ "status": "success", "state": "prepared" }),
+        LoadState::Loading(report) => with_progress("loading", report),
         LoadState::Ready { model, device } => json!({
             "status": "success",
             "state": "ready",
@@ -133,7 +141,44 @@ async fn status(State(s): State<Arc<AppState>>) -> Json<Value> {
     })
 }
 
-/// `POST /v1/load` body. `provider` is accepted and ignored — it is a
+/// The status of a prepare or a load in `state`, with how far it has got.
+fn with_progress(state: &str, report: Report) -> Value {
+    let mut out = json!({ "status": "success", "state": state });
+    if let Some(phase) = report.phase {
+        out["phase"] = json!(phase.as_str());
+    }
+    if let Some(step) = report.step {
+        out["step"] = json!(step.as_str());
+    }
+    if let Some(progress) = report.progress {
+        out["progress"] = json!(progress);
+    }
+    out
+}
+
+/// The models `backend.toml` declares: the only names a load or a prepare
+/// accepts, since a name goes on to be a path under `models/`.
+const MODELS: [&str; 5] = [
+    "qwen3-tts-0.6b-custom-voice",
+    "qwen3-tts-1.7b-custom-voice",
+    "qwen3-tts-1.7b-voice-design",
+    "qwen3-tts-0.6b-base",
+    "qwen3-tts-1.7b-base",
+];
+
+/// The model a load or a prepare body names, if it is one this backend
+/// declares, or why not: the detail of the contract's `invalid_model`.
+fn declared_model(name: Option<String>) -> Result<String, String> {
+    let Some(name) = name.filter(|n| !n.trim().is_empty()) else {
+        return Err("no model name".to_string());
+    };
+    if !MODELS.contains(&name.as_str()) {
+        return Err(format!("{name:?} is not a model this backend declares"));
+    }
+    Ok(name)
+}
+
+/// `POST /v1/load` and `POST /v1/prepare` body. `provider` is accepted and ignored — it is a
 /// compatibility echo from an older identity scheme, and the contract says a
 /// new backend should not validate it.
 #[derive(Debug, Deserialize)]
@@ -144,6 +189,85 @@ struct LoadRequest {
     name: Option<String>,
     #[serde(default)]
     device: Option<String>,
+}
+
+/// `POST /v1/prepare` — build the kernels a load of the model will need from
+/// its small files alone, while the daemon is still fetching its weights.
+///
+/// Answers `202` at once, as a load does, and reports through
+/// `GET /v1/status`: `preparing`, then `prepared`. It never fails a load: a
+/// prepare that errors or panics is logged and goes back to `starting`, and
+/// the load then builds the kernels itself. The build is a job on the model
+/// thread, so a load sent meanwhile is queued behind it and starts once the
+/// build has handed its memory back.
+async fn prepare(State(s): State<Arc<AppState>>, body: Option<Json<LoadRequest>>) -> Response {
+    let Some(Json(req)) = body else {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_model",
+            "malformed prepare body",
+        );
+    };
+    let name = match declared_model(req.name) {
+        Ok(name) => name,
+        Err(detail) => return json_error(StatusCode::BAD_REQUEST, "invalid_model", &detail),
+    };
+    let accepted = || {
+        (
+            StatusCode::ACCEPTED,
+            Json(json!({ "status": "success", "message": "Preparing started" })),
+        )
+            .into_response()
+    };
+
+    {
+        let mut guard = s.state.write().unwrap_or_else(PoisonError::into_inner);
+        match &*guard {
+            LoadState::Loading(_) | LoadState::Ready { .. } => {
+                return json_error(
+                    StatusCode::CONFLICT,
+                    "already_loading",
+                    "a load has already begun",
+                );
+            }
+            LoadState::Preparing(_) | LoadState::Prepared => return accepted(),
+            LoadState::Starting | LoadState::Failed { .. } => {}
+        }
+        if QwenTts::kernels_built(&name) {
+            *guard = LoadState::Prepared;
+            return accepted();
+        }
+        *guard = LoadState::Preparing(Report::default());
+    }
+
+    let state = Arc::clone(&s);
+    let device = req.device;
+    let queued = s.model.submit(move |_| {
+        let report = |report: Report| state.report(report);
+        let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            QwenTts::build_kernels(&state.backend_dir, &name, device.as_deref(), &report)
+        }))
+        .unwrap_or_else(|panic| {
+            Err(anyhow::anyhow!(
+                "the build panicked: {}",
+                panic_message(&*panic)
+            ))
+        });
+        match &built {
+            Ok(()) => log::info!("built the kernels of {name}; prepared"),
+            Err(e) => log::warn!("building the kernels ahead of the load failed: {e:#}"),
+        }
+        state.end_prepare(built.is_ok());
+    });
+    if !queued {
+        s.end_prepare(false);
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "inference_failed",
+            "the model thread is gone",
+        );
+    }
+    accepted()
 }
 
 /// `POST /v1/load` — answer `202` immediately and load in the background.
@@ -159,18 +283,49 @@ async fn load(State(s): State<Arc<AppState>>, body: Option<Json<LoadRequest>>) -
             "malformed load body",
         );
     };
-    let Some(name) = req.name.filter(|n| !n.trim().is_empty()) else {
-        return json_error(StatusCode::BAD_REQUEST, "invalid_model", "no model name");
+    let name = match declared_model(req.name) {
+        Ok(name) => name,
+        Err(detail) => return json_error(StatusCode::BAD_REQUEST, "invalid_model", &detail),
     };
 
-    s.set_state(LoadState::Loading(Report::default()));
+    // A load in flight is refused rather than queued behind it, as the
+    // contract says. A prepare still building is not a load: it goes on
+    // reporting its progress, as this load's, and the whole load then counts
+    // as the initial setup it is. It runs ahead of this load on the model
+    // thread, so the load waits for it there.
+    let preparing = {
+        let mut guard = s.state.write().unwrap_or_else(PoisonError::into_inner);
+        let (preparing, report) = match &*guard {
+            LoadState::Loading(_) => {
+                return json_error(
+                    StatusCode::CONFLICT,
+                    "already_loading",
+                    "a load is already in progress",
+                );
+            }
+            LoadState::Preparing(report) => (true, *report),
+            _ => (false, Report::default()),
+        };
+        *guard = LoadState::Loading(report);
+        preparing
+    };
     let state = Arc::clone(&s);
     let device = req.device.clone();
 
     let queued = s.model.submit(move |slot| {
         // The old model goes first, so the two are never resident together.
         *slot = None;
-        let report = |report: Report| state.report(report);
+        let report = |mut report: Report| {
+            if preparing {
+                // Until the load's first step, the prepare's last one stands,
+                // rather than a blank step in between.
+                if report.step.is_none() {
+                    return;
+                }
+                report.phase = Some(Phase::InitialSetup);
+            }
+            state.report(report);
+        };
         // Caught here as well as by the model thread, because only here can a
         // panic still be reported as the failed load it is: left to the
         // thread, the state would stay `loading` and the daemon would wait out
@@ -236,10 +391,8 @@ async fn cancel(State(s): State<Arc<AppState>>) -> Json<Value> {
 /// Body limit for `POST /v1/voices`.
 ///
 /// Sized to the largest body the daemon can ever send, not to this manifest's
-/// budget — which is the difference between a constant that survives the next
-/// edit and one that has to be found again. A budget of 15 seconds put 960 KB
-/// through here; raising it to 30 put 1.92 MB through a two-mebibyte limit,
-/// eight percent short of a bare `413` with nothing in it to read.
+/// budget: a limit sized to the budget breaks on the next edit that raises it,
+/// as a bare `413` with nothing in it to read.
 ///
 /// The envelope: the daemon stores at most `MAX_CLIP_SECONDS` — 120 seconds —
 /// and delivers 24 kHz mono `s16le`, which is 5.76 MB raw and 7.32 MiB once
@@ -753,16 +906,233 @@ mod tests {
         assert_eq!(body["step"], "building_kernels");
         assert_eq!(body["progress"], 0.5);
 
-        state.set_state(LoadState::Ready {
-            model: "m".to_string(),
-            device: "cpu".to_string(),
-        });
+        state.set_state(LoadState::Preparing(Report::default()));
         state.report(report);
         let (_, body) = status(&state).await;
-        assert_eq!(body["state"], "ready");
-        for field in ["phase", "step", "progress"] {
-            assert!(body.get(field).is_none(), "{field} outside a load: {body}");
+        assert_eq!(body["state"], "preparing");
+        assert_eq!(body["phase"], "initial_setup");
+        assert_eq!(body["step"], "building_kernels");
+        assert_eq!(body["progress"], 0.5);
+
+        for (done, name) in [
+            (LoadState::Prepared, "prepared"),
+            (
+                LoadState::Ready {
+                    model: "m".to_string(),
+                    device: "cpu".to_string(),
+                },
+                "ready",
+            ),
+        ] {
+            state.set_state(done);
+            state.report(report);
+            let (_, body) = status(&state).await;
+            assert_eq!(body["state"], name);
+            for field in ["phase", "step", "progress"] {
+                assert!(body.get(field).is_none(), "{field} outside a load: {body}");
+            }
         }
+    }
+
+    /// Waits until the state is no longer what `going` says it is, and returns it.
+    async fn wait_until_not(state: &AppState, going: impl Fn(&LoadState) -> bool) -> LoadState {
+        for _ in 0..500 {
+            let now = state.state();
+            if !going(&now) {
+                return now;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the state never moved on: {:?}", state.state());
+    }
+
+    /// Holds the model thread until the returned sender is dropped, so a job
+    /// queued meanwhile stays queued.
+    fn hold_the_model_thread(state: &AppState) -> std::sync::mpsc::Sender<()> {
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        assert!(state.model.submit(move |_| {
+            let _ = held.recv();
+        }));
+        release
+    }
+
+    /// Once a load has begun, there is nothing left for a prepare to build
+    /// ahead of it.
+    #[tokio::test]
+    async fn a_prepare_is_refused_once_a_load_has_begun() {
+        for begun in [
+            LoadState::Loading(Report::default()),
+            LoadState::Ready {
+                model: "m".to_string(),
+                device: "cpu".to_string(),
+            },
+        ] {
+            let (app, state) = app();
+            state.set_state(begun);
+            let (status, body) = call(
+                app,
+                post(
+                    "/v1/prepare",
+                    &json!({ "name": "qwen3-tts-0.6b-custom-voice" }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body["message"], "already_loading");
+        }
+    }
+
+    /// A prepare names the model it builds for as a load does, and is refused
+    /// the same way without one.
+    #[tokio::test]
+    async fn a_prepare_without_a_model_name_is_refused() {
+        let (app, state) = app();
+        let (status, body) = call(app, post("/v1/prepare", &json!({ "device": "cuda" }))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["message"], "invalid_model");
+        assert!(matches!(state.state(), LoadState::Starting));
+    }
+
+    /// A second load while one is in flight is refused with the contract's
+    /// code, and leaves the first one's progress alone.
+    #[tokio::test]
+    async fn a_load_while_one_runs_is_refused() {
+        use crate::progress::Step;
+
+        let (app, state) = app();
+        let running = Report {
+            phase: Some(Phase::InitialSetup),
+            step: Some(Step::LoadingWeights),
+            progress: Some(0.5),
+        };
+        state.set_state(LoadState::Loading(running));
+        let (status, body) = call(
+            app,
+            post(
+                "/v1/load",
+                &json!({ "name": "qwen3-tts-0.6b-custom-voice" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["message"], "already_loading");
+        match state.state() {
+            LoadState::Loading(report) => assert_eq!(report, running),
+            other => panic!("the running load lost its state: {other:?}"),
+        }
+    }
+
+    /// A name goes on to be a path under `models/`, so a load and a prepare
+    /// both refuse any but the models the manifest declares, before the state
+    /// moves.
+    #[tokio::test]
+    async fn an_undeclared_model_is_refused_by_a_load_and_a_prepare() {
+        for route in ["/v1/load", "/v1/prepare"] {
+            for name in ["kokoro-82m", "../qwen3-tts-0.6b-custom-voice"] {
+                let (app, state) = app();
+                let (status, body) = call(app, post(route, &json!({ "name": name }))).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{route} {name}");
+                assert_eq!(body["message"], "invalid_model", "{route} {name}");
+                assert!(
+                    matches!(state.state(), LoadState::Starting),
+                    "{route} {name}"
+                );
+            }
+        }
+    }
+
+    /// The list a name is checked against is the manifest's, model for model.
+    #[test]
+    fn the_declared_models_are_the_manifests() {
+        let manifest = include_str!("../backend.toml");
+        assert_eq!(crate::manifest_probe::model_names(manifest), MODELS);
+    }
+
+    /// A second prepare while one runs, or after it is done, is the same
+    /// request answered again, and starts nothing.
+    #[tokio::test]
+    async fn a_repeated_prepare_is_accepted_and_starts_nothing() {
+        for (already, name) in [
+            (LoadState::Preparing(Report::default()), "preparing"),
+            (LoadState::Prepared, "prepared"),
+        ] {
+            let (app, state) = app();
+            state.set_state(already);
+            let (status, body) = call(
+                app,
+                post(
+                    "/v1/prepare",
+                    &json!({ "name": "qwen3-tts-0.6b-custom-voice" }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            assert_eq!(body["message"], "Preparing started");
+            let (_, body) = call(
+                router(Arc::clone(&state)),
+                Request::builder()
+                    .uri("/v1/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(body["state"], name);
+        }
+    }
+
+    /// A prepare that cannot build is logged and forgotten: the backend goes
+    /// back to waiting for a load, which builds whatever is missing itself.
+    #[tokio::test]
+    async fn a_failed_prepare_goes_back_to_starting() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf()));
+        let (status, body) = call(
+            router(Arc::clone(&state)),
+            post(
+                "/v1/prepare",
+                &json!({ "name": "qwen3-tts-0.6b-custom-voice", "device": "cuda" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body["message"], "Preparing started");
+        let ended = wait_until_not(&state, |now| matches!(now, LoadState::Preparing(_))).await;
+        assert!(matches!(ended, LoadState::Starting), "{ended:?}");
+    }
+
+    /// A load sent while a prepare builds takes over its progress rather than
+    /// starting from nothing, waits for it on the model thread, and is what the
+    /// state reports once both are done.
+    #[tokio::test]
+    async fn a_load_during_a_prepare_waits_for_it_and_keeps_the_status() {
+        use crate::progress::Step;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf()));
+        let app = router(Arc::clone(&state));
+        let release = hold_the_model_thread(&state);
+        let req = json!({ "name": "qwen3-tts-0.6b-custom-voice", "device": "cuda" });
+        let (status, _) = call(app.clone(), post("/v1/prepare", &req)).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let building = Report {
+            phase: Some(Phase::InitialSetup),
+            step: Some(Step::BuildingKernels),
+            progress: Some(0.25),
+        };
+        state.report(building);
+
+        let (status, _) = call(app, post("/v1/load", &req)).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        match state.state() {
+            LoadState::Loading(report) => assert_eq!(report, building),
+            other => panic!("the load did not take the prepare over: {other:?}"),
+        }
+
+        // The prepare fails, which the load does not mind; the load then fails
+        // on the missing files, and the prepare's ending does not overwrite it.
+        drop(release);
+        let ended = wait_until_not(&state, |now| matches!(now, LoadState::Loading(_))).await;
+        assert!(matches!(ended, LoadState::Failed { .. }), "{ended:?}");
     }
 
     /// A load that panics reports what the panic said as its reason, from a
@@ -956,7 +1326,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::new(dir.path().to_path_buf()));
         let app = router(Arc::clone(&state));
-        let (status, _) = call(app, post("/v1/load", &json!({ "name": "missing-model" }))).await;
+        let (status, _) = call(
+            app,
+            post(
+                "/v1/load",
+                &json!({ "name": "qwen3-tts-0.6b-custom-voice" }),
+            ),
+        )
+        .await;
         assert_eq!(status, StatusCode::ACCEPTED);
 
         // The load runs on a blocking thread; give it a moment to fail.

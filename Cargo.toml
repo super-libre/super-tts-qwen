@@ -43,7 +43,7 @@
     # drains the calling stream first, where it freed nothing dropped since the
     # last sync. And a dense convolution may run as a matmul over its columns,
     # where a GPU without matrix units had only a direct kernel for it: the
-    # codec's vocoder is most of those, 13 times faster for it on an AMD BC-250.
+    # codec's vocoder is most of those.
     #
     # Burn is what buys this backend ROCm and Vulkan, which candle cannot
     # reach at all — CubeCL compiles every kernel at runtime for whatever
@@ -146,7 +146,7 @@
 # plus the fork's `compilation-cache-main` branch. A `[patch]` in Burn's own
 # manifest does not reach a build that merely depends on Burn — patches come
 # from the root of the crate being built — so this backend has to repeat it,
-# or it would build a different CubeCL than the branch was measured on.
+# or it would build a different CubeCL than the branch was tested against.
 # Seven commits ride on it: compiled kernels kept across runs by default, the
 # sliced memory pool coalescing its free slices lazily rather than on every
 # free, the channel server taking a partial batch when its producer pauses

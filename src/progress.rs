@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! What a load reports while it runs: the `phase`, `step` and `progress`
-//! fields of `GET /v1/status` while `state` is `loading`.
+//! fields of `GET /v1/status` while `state` is `loading`. A prepare reports
+//! the same while `state` is `preparing`: its kernel build is a load's
+//! warm-up, measured the same way.
 //!
 //! The daemon fails a load whose `step` and `progress` both stand still for
 //! 120 seconds once it has reported progress at all, so every step here is

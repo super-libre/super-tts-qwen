@@ -324,7 +324,8 @@ impl Model {
 /// those 622 MB for the life of the process; from the file a prompt costs a few hundred
 /// reads of 4 KB, which the page cache serves after the first.
 struct TextTable {
-    file: File,
+    /// `None` for a zeroed model, see [`Qwen3Tts::zeroed`], whose rows are all zero.
+    file: Option<File>,
     /// Where its first row starts in the file.
     start: u64,
     rows: usize,
@@ -379,12 +380,23 @@ impl TextTable {
             )));
         }
         Ok(Self {
-            file,
+            file: Some(file),
             start: 8 + len + begin,
             rows,
             width,
             dtype,
         })
+    }
+
+    /// A table of `rows` rows of `width`, every one zero, as if stored in `dtype`.
+    fn zeroed(rows: usize, width: usize, dtype: DType) -> Self {
+        Self {
+            file: None,
+            start: 0,
+            rows,
+            width,
+            dtype,
+        }
     }
 
     /// Its size in the file.
@@ -396,7 +408,6 @@ impl TextTable {
     fn rows(&self, ids: &[u32], dtype: DType) -> Result<TensorData, String> {
         let row = self.width * self.dtype.size();
         let mut bytes = vec![0; ids.len() * row];
-        let mut file = &self.file;
         for (&id, out) in ids.iter().zip(bytes.chunks_exact_mut(row)) {
             if id as usize >= self.rows {
                 return Err(format!(
@@ -404,6 +415,9 @@ impl TextTable {
                     self.rows
                 ));
             }
+            let Some(mut file) = self.file.as_ref() else {
+                continue;
+            };
             file.seek(SeekFrom::Start(self.start + u64::from(id) * row as u64))
                 .and_then(|_| file.read_exact(out))
                 .map_err(|e| format!("reading the text embedding of token {id}: {e}"))?;
@@ -505,6 +519,20 @@ const MIN_NEW_TOKENS: usize = 2;
 
 /// Number of special (non acoustic) entries at the end of the talker codec vocabulary.
 const NUM_SPECIAL_CODEC_TOKENS: usize = 1024;
+
+/// Refuses a talker vocabulary without room for the special tokens, or without its end of
+/// speech token.
+fn check_vocab(cfg: &Config) -> Result<(), String> {
+    let tc = &cfg.talker_config;
+    if tc.vocab_size <= NUM_SPECIAL_CODEC_TOKENS || tc.codec_eos_token_id as usize >= tc.vocab_size
+    {
+        return Err(format!(
+            "unexpected talker vocab size {} for eos token {}",
+            tc.vocab_size, tc.codec_eos_token_id
+        ));
+    }
+    Ok(())
+}
 
 /// What the passes of a frame read and write besides the transformer caches: the sampled
 /// codes, the noise the sampling draws from and the embeddings handed from one pass to the
@@ -627,6 +655,10 @@ pub struct Qwen3Tts {
     /// Whether the talker's decode steps are captured and replayed, see [`TalkerGraphs`].
     graph_talker: bool,
     talker_graphs: Option<TalkerGraphs>,
+    /// Whether the end of speech token is never sampled, so a generation runs until its
+    /// caller stops it or `max_new_tokens`: set on a zeroed model, whose draws are uniform
+    /// and would otherwise end a generation at a random frame.
+    endless: bool,
     config: Config,
     device: Device,
     dtype: DType,
@@ -642,14 +674,7 @@ impl Qwen3Tts {
         device: &Device,
         read: &Arc<AtomicU64>,
     ) -> Result<Self, String> {
-        if cfg.talker_config.vocab_size <= NUM_SPECIAL_CODEC_TOKENS
-            || cfg.talker_config.codec_eos_token_id as usize >= cfg.talker_config.vocab_size
-        {
-            return Err(format!(
-                "unexpected talker vocab size {} for eos token {}",
-                cfg.talker_config.vocab_size, cfg.talker_config.codec_eos_token_id
-            ));
-        }
+        check_vocab(cfg)?;
         let text_table = TextTable::open(
             weights,
             cfg.talker_config.text_vocab_size,
@@ -687,7 +712,33 @@ impl Qwen3Tts {
             result.missing.retain(|(path, _)| !speaker_encoder(path));
         }
         crate::qwen3::check_apply_result("talker", &result)?;
-        Ok(Self {
+        Ok(Self::assemble(cfg, model, text_table, dtype, device))
+    }
+
+    /// The model `cfg` describes with every weight zero, in `dtype`, the speaker encoder
+    /// included when `cfg` announces one: the shapes, dtypes and layouts of a loaded
+    /// checkpoint, so it runs the same kernels without one. Unlike [`Self::load`]'s, its
+    /// weights live in the pools a cleanup hands back to the device. Its draws are uniform,
+    /// so it never ends a generation by itself.
+    pub fn zeroed(cfg: &Config, dtype: DType, device: &Device) -> Result<Self, String> {
+        check_vocab(cfg)?;
+        let tc = &cfg.talker_config;
+        let text_table = TextTable::zeroed(tc.text_vocab_size, tc.text_hidden_size, dtype);
+        let model = Model::init(cfg, device)?.map(&mut crate::qwen3::Zeros { dtype });
+        let mut zeroed = Self::assemble(cfg, model, text_table, dtype, device);
+        zeroed.endless = true;
+        Ok(zeroed)
+    }
+
+    /// The model around its weights and its text table, loaded or zeroed.
+    fn assemble(
+        cfg: &Config,
+        model: Model,
+        text_table: TextTable,
+        dtype: DType,
+        device: &Device,
+    ) -> Self {
+        Self {
             talker_state: TransformerState::new(
                 &cfg.talker_config.transformer_config(),
                 dtype,
@@ -708,12 +759,13 @@ impl Qwen3Tts {
             code_predictor_graphs: None,
             graph_talker: false,
             talker_graphs: None,
+            endless: false,
             model,
             text_table,
             config: cfg.clone(),
             device: device.clone(),
             dtype,
-        })
+        }
     }
 
     /// Makes the generations from now on capture the talker's decode step as graphs and replay
@@ -947,8 +999,9 @@ impl Qwen3Tts {
     }
 
     /// Writes what the talker must not sample: the special tokens, except the end of speech
-    /// one when `allow_eos`.
+    /// one when `allow_eos` and the model is not `endless`.
     fn write_bias(&self, allow_eos: bool) {
+        let allow_eos = allow_eos && !self.endless;
         let tc = &self.config.talker_config;
         let mut bias = vec![0f32; tc.vocab_size];
         for (token, value) in bias
@@ -1548,5 +1601,22 @@ mod tests {
         let table = TextTable::open(&path, 2, 2).unwrap();
         let err = table.rows(&[0, 2], DType::F32).unwrap_err();
         assert!(err.contains("token 2"), "{err}");
+    }
+
+    /// A zeroed table reads no file, and gives the rows a loaded one would in shape and dtype,
+    /// every value zero. It refuses the tokens a loaded one would.
+    #[test]
+    fn a_zeroed_text_table_gives_zero_rows_of_the_loaded_shape() {
+        let table = TextTable::zeroed(3, 2, DType::BF16);
+        let rows = table.rows(&[2, 0, 1], DType::F16).unwrap();
+        assert_eq!(rows.shape().as_slice(), [1, 3, 2]);
+        assert!(
+            rows.as_slice::<f16>()
+                .unwrap()
+                .iter()
+                .all(|v| *v == f16::ZERO)
+        );
+        let err = table.rows(&[3], DType::F16).unwrap_err();
+        assert!(err.contains("token 3"), "{err}");
     }
 }

@@ -20,8 +20,8 @@ jobs:
       matrix:
         include:
           # One build per (target, accelerator). CubeCL compiles kernels at
-          # runtime, so there is no compute-capability axis: what used to be
-          # twelve CUDA builds is two, one per CUDA major version.
+          # runtime, so there is no compute-capability axis: there are two CUDA
+          # builds, one per CUDA major version.
           #
           # Every build is a GPU build: the models are too big for a CPU to run
           # at a useful speed. `features` is passed with `--no-default-features`,
