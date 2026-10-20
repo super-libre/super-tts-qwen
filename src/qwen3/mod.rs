@@ -42,6 +42,11 @@
 //! arithmetic and its tests beside it. Until the fork has it, the diff above
 //! shows that hunk.
 //!
+//! The other deliberate edit builds a model without its checkpoint: [`Zeros`] here, and the
+//! `zeroed` constructors of [`model::Qwen3Tts`] and [`speech_tokenizer::SpeechTokenizer`] it
+//! serves, which the backend's kernel build runs its warm-up on before the weights arrive. It
+//! waits to be carried back to the fork too.
+//!
 //! It is vendored rather than depended on because the example crate is a
 //! demo: it also pulls `clap`, `hf-hub` and `tokenizers/onig`, and cargo
 //! unifies features across a dependency graph, so taking it whole would put a
@@ -81,7 +86,9 @@ pub mod transformer;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use burn::module::{ModuleMapper, Param};
 use burn::nn::{LinearConfig, LinearLayout};
+use burn::prelude::Tensor;
 use burn::tensor::{DType, TensorData, bf16, f16};
 use burn_store::burn_pack::Tensor as PackTensor;
 use burn_store::{ModuleAdapter, ModuleContext, bridge};
@@ -146,6 +153,31 @@ impl ModuleAdapter for HalfCast {
 
     fn clone_box(&self) -> Box<dyn ModuleAdapter> {
         Box::new(self.clone())
+    }
+}
+
+/// Replaces every float parameter of a module with zeros of its shape in `dtype`, made the way
+/// the store makes a loaded one and without initializing it first: a module mapped with it has
+/// the shapes, dtypes and layouts of a loaded checkpoint, so it runs the same kernels without
+/// one. Its parameters live in the ordinary pools, which a cleanup hands back to the device.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Zeros {
+    pub dtype: DType,
+}
+
+impl ModuleMapper for Zeros {
+    fn map_float<const D: usize>(&mut self, param: Param<Tensor<D>>) -> Param<Tensor<D>> {
+        let shape = param.lazy_shape();
+        let device = param.lazy_device();
+        // Built in the target type where it is one of the three the checkpoints run in, so
+        // nothing is converted on the host.
+        let data = match self.dtype {
+            DType::BF16 => TensorData::zeros::<bf16, _>(shape),
+            DType::F16 => TensorData::zeros::<f16, _>(shape),
+            _ => TensorData::zeros::<f32, _>(shape),
+        };
+        let id = param.id;
+        param.transform_for_load(Tensor::from_data(data, (&device, self.dtype)), id)
     }
 }
 
@@ -265,6 +297,30 @@ pub(crate) fn test_device() -> burn::prelude::Device {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A zeroed parameter has the shape and the dtype a loaded one would. A column-major linear
+    /// weight is made `[d_output, d_input]` and goes through the layer's load transform, as a
+    /// loaded one does, so it is exposed as `[d_input, d_output]`.
+    #[test]
+    fn zeroed_parameters_have_the_shape_and_dtype_of_loaded_ones() {
+        use burn::module::Module;
+
+        let device = test_device();
+        for dtype in [DType::F32, DType::F16, DType::BF16] {
+            if !device.supports_dtype(dtype) {
+                continue;
+            }
+            let linear = linear_config(3, 5).init(&device).map(&mut Zeros { dtype });
+            let weight = linear.weight.val();
+            assert_eq!(weight.dtype(), dtype);
+            assert_eq!(weight.shape().dims::<2>(), [3, 5]);
+            let values = weight.cast(DType::F32).into_data();
+            assert!(
+                values.as_slice::<f32>().unwrap().iter().all(|v| *v == 0.0),
+                "{dtype:?}"
+            );
+        }
+    }
 
     #[test]
     fn the_parallel_cast_matches_burns_bit_for_bit() {

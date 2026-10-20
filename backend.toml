@@ -161,6 +161,7 @@
     # ignores `instructions` — the 0.6B models were not trained on them and the
     # reference implementation drops them.
     voice_kinds = ["preset"]
+    prepare_files = ["models/qwen3-tts-0.6b-custom-voice/config.json", "models/qwen3-tts-0.6b-custom-voice/speech_tokenizer/config.json", "models/qwen3-tts-0.6b-custom-voice/tokenizer.json"]
     files = [
         { url = "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice/resolve/main/config.json", destination = "models/qwen3-tts-0.6b-custom-voice/config.json", sha256 = "81aca2b6fac304944d8acf345272d8a9a727d5fc2e2e66b222ab4729340c7455" },
         { url = "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice/resolve/main/model.safetensors", destination = "models/qwen3-tts-0.6b-custom-voice/model.safetensors", sha256 = "bc3c7e785eb961179c25450d1acff03f839e0002f2f3a5aeb67b5735c0fa2adb" },
@@ -245,6 +246,7 @@
     # Preset: the voice is still one of the nine. Unlike the 0.6B checkpoint,
     # this one takes `instructions` as delivery guidance on top of the voice.
     voice_kinds = ["preset"]
+    prepare_files = ["models/qwen3-tts-1.7b-custom-voice/config.json", "models/qwen3-tts-1.7b-custom-voice/speech_tokenizer/config.json", "models/qwen3-tts-1.7b-custom-voice/tokenizer.json"]
     files = [
         { url = "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/main/config.json", destination = "models/qwen3-tts-1.7b-custom-voice/config.json", sha256 = "17a07f527a1c25ea30b4e023a184482a23d3e279d697b1dc81b1bde498d29cf9" },
         { url = "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/main/model.safetensors", destination = "models/qwen3-tts-1.7b-custom-voice/model.safetensors", sha256 = "38b1d5971bdbd982b561cccec982669a53b0537c3cf5e9bd4778ed07bb2f5137" },
@@ -341,6 +343,7 @@
     # differ from one request to the next.
     voice_kinds = ["preset", "described"]
     default_voice = "neutral-narrator-female"
+    prepare_files = ["models/qwen3-tts-1.7b-voice-design/config.json", "models/qwen3-tts-1.7b-voice-design/speech_tokenizer/config.json", "models/qwen3-tts-1.7b-voice-design/tokenizer.json"]
     files = [
         { url = "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign/resolve/main/config.json", destination = "models/qwen3-tts-1.7b-voice-design/config.json", sha256 = "aecd2cc4c1fe9edef1cb7ca7c401685a43879ad43f3f9e883f1c6760b61731e0" },
         { url = "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign/resolve/main/model.safetensors", destination = "models/qwen3-tts-1.7b-voice-design/model.safetensors", sha256 = "391e8db219f292c515297cdceeb43e4eae67cdde35fa57e79a6a8a532fca0522" },
@@ -454,6 +457,7 @@
     # rather than a target: a clip is trimmed to it, never padded up to it.
     voice_kinds = ["cloned"]
     clone_ref_seconds = 30.0
+    prepare_files = ["models/qwen3-tts-0.6b-base/config.json", "models/qwen3-tts-0.6b-base/speech_tokenizer/config.json", "models/qwen3-tts-0.6b-base/tokenizer.json"]
     files = [
         { url = "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/resolve/main/config.json", destination = "models/qwen3-tts-0.6b-base/config.json", sha256 = "2e714c787c8edb98b05432685cddb634add2de4d4e645f653d68251ef72ba011" },
         { url = "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/resolve/main/model.safetensors", destination = "models/qwen3-tts-0.6b-base/model.safetensors", sha256 = "180b3b10eb1c9f1b4db7806d5475bae3071c0243c299d49926bab1da3b6946f6" },
@@ -474,6 +478,7 @@
     output_sample_rate = 24000
     voice_kinds = ["cloned"]
     clone_ref_seconds = 30.0
+    prepare_files = ["models/qwen3-tts-1.7b-base/config.json", "models/qwen3-tts-1.7b-base/speech_tokenizer/config.json", "models/qwen3-tts-1.7b-base/tokenizer.json"]
     files = [
         { url = "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base/resolve/main/config.json", destination = "models/qwen3-tts-1.7b-base/config.json", sha256 = "b4f01752d15a488abde3e1ab44723ae4f4b9e68a4037257b098b3737893cc1f9" },
         { url = "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base/resolve/main/model.safetensors", destination = "models/qwen3-tts-1.7b-base/model.safetensors", sha256 = "38fc7fc51c5e776e840414b6fd443962e9411b9654888fd7913e4da643cb857c" },

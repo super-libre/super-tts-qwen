@@ -10,8 +10,8 @@
 //! thread either.
 //!
 //! It gets a thread of its own instead, and every use of it is a job sent
-//! there. That also gives the serialization the mutex used to: jobs run one at
-//! a time, in the order they were submitted, which is what a single GPU and a
+//! there. That also gives the serialization a mutex would: jobs run one at a
+//! time, in the order they were submitted, which is what a single GPU and a
 //! model with one key/value cache want anyway.
 //!
 //! And it knows when the model is idle: once no job has come for

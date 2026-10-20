@@ -284,13 +284,15 @@ never reach it, and the first real request was paying for it instead.
 
 A Base checkpoint has no voice to warm up with, since it only speaks in one that
 was registered. So the warm-up invents one: five seconds of two tones under a
-tremolo, cloned through the real speaker encoder and the real codec encoder, and
-released again when the ladder is done. That covers the encoders and a
-generation conditioned on an embedding rather than on a speaker. What it cannot
-cover is the length of somebody's actual recording — the encoders key on that
-too — so registering a voice can tune once for a clip length not seen before.
-That cost lands in `POST /v1/voices`, which happens once per voice, rather than
-in a synthesis.
+tremolo, cloned through the speaker encoder without a transcript, and released
+again when the ladder is done. That covers the speaker encoder and a
+generation conditioned on an embedding rather than on a speaker. The codec
+encoder is left out on purpose: it runs only for a voice registered with a
+transcript, to make the in-context example, and it and that example are keyed
+on the length of the recording, which five invented seconds would not match.
+The speaker encoder keys on the length too, so registering a voice can tune
+once for a clip length not seen before. That cost lands in `POST /v1/voices`,
+which happens once per voice, rather than in a synthesis.
 
 What that wait costs, on an RTX 3090:
 
@@ -318,6 +320,38 @@ moving where nothing is compiled. The daemon fails a load whose step and
 progress stand still for two minutes; the longest stretch without either moving
 was 5 seconds on CUDA, 2 on Vulkan and 2.5 on Metal, and 20 on the BC-250,
 whose first load takes 8 minutes.
+
+### Building the kernels before the weights arrive
+
+The kernels depend on the shapes the model runs at, not on its weights, so
+they can be built while the daemon is still downloading those. `POST
+/v1/prepare`, with the body of `/v1/load`, builds them from the three small
+files each model lists as its `prepare_files`: `config.json`,
+`speech_tokenizer/config.json` and `tokenizer.json`. It runs the load's
+warm-up on a model whose weights are all zeros, keeping two layers of the
+talker and two of its code predictor, since every layer runs the same kernels.
+The codec keeps all of its layers: how many it stacks sets the context of a
+streamed decode, and so the shape of every decode. With zero weights every
+draw is uniform, so the build never samples the end of speech, and the long
+pass always reaches the point where the key/value cache doubles.
+
+The status reads `preparing`, with the same `phase`, `step` and `progress` as
+a load, then `prepared`. A prepare that fails goes back to `starting`, and the
+load builds the kernels itself. The build runs on the model thread like any
+other job, so a load sent meanwhile waits for it there, takes over its
+progress, and reports both as one `initial_setup`: `building_kernels`, then
+`loading_weights` and `warming_up`. A second process over the same cache
+answers `prepared` at once, from the marker. Both routes refuse a model the
+manifest does not declare, and a load sent while another is in flight is
+refused with `409 already_loading`. Every model in the manifest lists its
+`prepare_files`.
+
+On the RTX 3090 with the 0.6B CustomVoice model, a load after a prepare is
+ready in 6.9 seconds on CUDA and 4.3 on Vulkan. A prepare takes about as long
+as a plain first load, since it does the same work, but it no longer waits for
+the weights, and it peaks about a gigabyte lower: its memory goes back to the
+device before the weights are mapped. The measurements are in
+[`docs/port-notes.md`](docs/port-notes.md).
 
 ### Building
 
@@ -375,14 +409,15 @@ making the directory installable with the daemon's import-from-directory path.
 |---|---|
 | `src/main.rs` | Socket setup; the two environment variables that are the whole interface. |
 | `src/server.rs` | The `/v1` routes, and the error codes the contract names. |
-| `src/model.rs` | Loading, generation, and the chunked decode that makes streaming seamless. |
+| `src/model.rs` | Loading, the kernel build a prepare runs, generation, and the chunked decode that makes streaming seamless. |
 | `src/model_thread.rs` | The thread the model lives on, because Burn's generation state is not `Send`. |
-| `src/progress.rs` | What a load reports while it runs: the `phase`, `step` and `progress` of `GET /v1/status`. |
+| `src/progress.rs` | What a prepare or a load reports while it runs: the `phase`, `step` and `progress` of `GET /v1/status`. |
 | `src/qwen3/` | The model itself, vendored from Burn's `qwen3-tts` example. |
 | `src/prompt.rs` | The chat template, and its cross-check against the reference tokenizer. |
 | `src/voices.rs` | The three voice id shapes, which ones a checkpoint can resolve, and the twelve designed voices. |
 | `src/lang.rs` | BCP-47 codes to the language names the talker conditions on. |
 | `src/frames.rs` | The response framing, encoded independently of the daemon's decoder. |
+| `docs/port-notes.md` | The measurements and findings behind choices in the code, which its comments leave out. |
 | `backend.toml` | The manifest: models, voices, options, files and their hashes, release assets. |
 | `clippy.toml` | The Qwen checkpoint-family names, so `doc_markdown` stops reading them as items. |
 

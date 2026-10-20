@@ -60,6 +60,20 @@ pub(crate) fn declared_choices<'a>(manifest: &'a str, name: &str) -> Option<Vec<
     None
 }
 
+/// The `name` of every `[[models]]` entry, in the order the manifest lists
+/// them. Read after each line that is the table's header itself, since a
+/// comment can mention the table too.
+pub(crate) fn model_names(manifest: &str) -> Vec<&str> {
+    let mut lines = manifest.lines();
+    let mut names = Vec::new();
+    while lines.any(|l| l.trim() == "[[models]]") {
+        if let Some(name) = lines.find_map(|l| option_value(l, "name")) {
+            names.push(name);
+        }
+    }
+    names
+}
+
 /// One `key = value` from the `[[options]]` block declaring `name`, unquoted.
 pub(crate) fn option_field<'a>(manifest: &'a str, name: &str, key: &str) -> Option<&'a str> {
     option_body(manifest, name)?

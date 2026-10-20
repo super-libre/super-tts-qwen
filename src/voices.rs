@@ -233,10 +233,9 @@ pub fn design(id: &str) -> Option<&'static str> {
 
 /// The description the backend is configured with, if any.
 ///
-/// One option rather than the two this backend used to declare: which voice a
-/// model speaks in is now a voice id the daemon stores per model, and only the
-/// free-text half — the sentence behind [`CUSTOM_VOICE_ID`] — is left with
-/// nowhere else to live. A picker's worth of fixed choices is a voice list; a
+/// One option, and only for the free text: which voice a model speaks in is a
+/// voice id the daemon stores per model, and only the sentence behind
+/// [`CUSTOM_VOICE_ID`] has nowhere else to live. A picker's worth of fixed choices is a voice list; a
 /// sentence the user writes is not.
 ///
 /// A blank field is the field left alone, not an instruction to say nothing:
@@ -368,7 +367,7 @@ mod tests {
     fn the_designs_are_distinct_and_populated() {
         for (id, name, description) in DESIGNS {
             assert!(!name.trim().is_empty(), "a design has no name");
-            // The id is a wire value now — it travels in a request and is
+            // The id is a wire value — it travels in a request and is
             // stored in the daemon's config — so it has to be the kind of
             // token that survives both, not a sentence with spaces in it.
             assert!(

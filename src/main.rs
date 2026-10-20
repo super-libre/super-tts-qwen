@@ -50,9 +50,9 @@ const ENV_CACHE_DIR: &str = "SUPER_TTS_BACKEND_CACHE_DIR";
 #[tokio::main]
 async fn main() -> Result<()> {
     // CubeCL's ROCm compiler, pliron, logs its whole IR after every pass at
-    // `info`, which is the level the daemon runs backends at: one cold load
-    // wrote a 10 GB log in about seven minutes on an AMD card. `RUST_LOG`
-    // still turns it back on, as `pliron=info`.
+    // `info`, which is the level the daemon runs backends at, so a cold load on
+    // an AMD card would flood the log. `RUST_LOG` still turns it back on, as
+    // `pliron=info`.
     env_logger::Builder::new()
         .filter_module("pliron", log::LevelFilter::Warn)
         .parse_env(env_logger::Env::default().default_filter_or("info"))
