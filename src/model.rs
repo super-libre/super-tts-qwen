@@ -600,7 +600,7 @@ fn select_device(requested: Option<&str>) -> (Device, &'static str) {
 /// about twenty seconds — and keeps them on disk so only the first run of a
 /// build pays. Left to itself it would write under `$HOME`, which the sandbox
 /// mounts read-only, so it would recompile on every load. The daemon hands
-/// over a writable directory for exactly this; see `SUPER_TTS_BACKEND_CACHE_DIR`
+/// over a writable directory for exactly this; see `SUPER_VOICE_BACKEND_CACHE_DIR`
 /// in the subprocess protocol.
 ///
 /// Must run before the first device is created, because the configuration is
