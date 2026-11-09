@@ -252,7 +252,7 @@ hundred of them, about twenty seconds' worth, spread over the first frames and
 the first decode. They are then kept on disk, so only the first run of a build
 pays.
 
-There is one place to keep them: `SUPER_TTS_BACKEND_CACHE_DIR`, which the
+There is one place to keep them: `SUPER_VOICE_BACKEND_CACHE_DIR`, which the
 daemon creates and adds to the sandbox's writable paths. Everything else the
 backend can see is read-only, and the writable `/tmp` is `PrivateTmp` and dies
 with the unit. A daemon too old to grant the directory still works — the

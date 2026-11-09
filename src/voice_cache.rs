@@ -35,7 +35,7 @@ const VERSION: u16 = 1;
 
 /// Names the writable directory the sandbox grants. Kept in step with
 /// `main.rs`, which reads the same variable to place the kernel cache.
-const ENV_CACHE_DIR: &str = "SUPER_TTS_BACKEND_CACHE_DIR";
+const ENV_CACHE_DIR: &str = "SUPER_VOICE_BACKEND_CACHE_DIR";
 
 /// What registering a voice derives, in the form it is written down.
 #[derive(Debug, Clone, PartialEq)]

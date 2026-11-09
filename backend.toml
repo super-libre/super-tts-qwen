@@ -1,4 +1,4 @@
-#:schema https://jorge-menjivar.github.io/super-tts/backend.schema.json
+#:schema https://jorge-menjivar.github.io/super-voice/backend.schema.json
 # Qwen text-to-speech for Super TTS.
 #
 # The backend is named for the family, the models for their generation: a later
@@ -18,7 +18,7 @@
     version = "0.1.0"
     kind = "subprocess"
     entrypoint = "super-tts-backend-qwen"
-    product = "super-tts"
+    product = "super-voice"
     contract = "v1"
     license = "GPL-3.0-only"
     description = "Qwen local text-to-speech, 24 kHz, 10 languages. Serves the Qwen3-TTS checkpoints: nine preset voices, or a voice built from a description."
@@ -139,6 +139,7 @@
 
 [[models]]
     name = "qwen3-tts-0.6b-custom-voice"
+    role = "synthesis"
     multilingual = true
     primary_language = "en"
     # The ten languages the talker's `codec_language_id` table names, as BCP-47
@@ -234,6 +235,7 @@
 
 [[models]]
     name = "qwen3-tts-1.7b-custom-voice"
+    role = "synthesis"
     multilingual = true
     primary_language = "en"
     supported_languages = ["de", "en", "es", "fr", "it", "ja", "ko", "pt", "ru", "zh"]
@@ -316,6 +318,7 @@
 
 [[models]]
     name = "qwen3-tts-1.7b-voice-design"
+    role = "synthesis"
     multilingual = true
     primary_language = "en"
     supported_languages = ["de", "en", "es", "fr", "it", "ja", "ko", "pt", "ru", "zh"]
@@ -438,6 +441,7 @@
 # refuse a clip stored without words, which is a voice this backend can serve.
 [[models]]
     name = "qwen3-tts-0.6b-base"
+    role = "synthesis"
     multilingual = true
     primary_language = "en"
     supported_languages = ["de", "en", "es", "fr", "it", "ja", "ko", "pt", "ru", "zh"]
@@ -468,6 +472,7 @@
 
 [[models]]
     name = "qwen3-tts-1.7b-base"
+    role = "synthesis"
     multilingual = true
     primary_language = "en"
     supported_languages = ["de", "en", "es", "fr", "it", "ja", "ko", "pt", "ru", "zh"]
