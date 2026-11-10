@@ -141,7 +141,7 @@ jobs:
           fi
           "$build" build --release --locked --target ${{ matrix.target }} \
             --no-default-features --features "${{ matrix.features }}" \
-            --bin super-tts-backend-qwen
+            --bin super-voice-backend-qwen-tts
 
       # `COPYFILE_DISABLE` stops macOS's bsdtar adding an AppleDouble `._`
       # entry for any file carrying extended attributes. GNU tar ignores it.
@@ -150,7 +150,7 @@ jobs:
           COPYFILE_DISABLE: "1"
         run: |
           tar -czf "qwen-${{ matrix.target }}-${{ matrix.suffix }}.tar.gz" \
-            -C "target/${{ matrix.target }}/release" super-tts-backend-qwen
+            -C "target/${{ matrix.target }}/release" super-voice-backend-qwen-tts
           ls -lh qwen-*.tar.gz
 
       - uses: actions/upload-artifact@v7

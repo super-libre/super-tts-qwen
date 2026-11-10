@@ -1,4 +1,4 @@
-Super TTS — Qwen TTS backend
+Super Voice — Qwen TTS backend
 Copyright (C) 2026 Jorge Menjivar <jorge@menjivar.ai>
 
 This program is free software: you can redistribute it and/or modify it under
@@ -9,7 +9,7 @@ version. See LICENSE for the full text.
 This backend derives from the third-party work below. Nothing in this list is
 redistributed in this repository or in its release archives: the model code is
 compiled in from a pinned dependency, and the weights are downloaded by the
-Super TTS daemon on the user's machine.
+Super Voice daemon on the user's machine.
 
 
 ## candle — Apache-2.0 / MIT
@@ -32,7 +32,7 @@ with left context that makes streamed audio identical to a single decode.
 
 ## Fetched at runtime, not redistributed here
 
-These are downloaded by the Super TTS daemon on the user's machine before first
+These are downloaded by the Super Voice daemon on the user's machine before first
 use, under their own terms; no part of them is contained in this repository or
 its release archives.
 

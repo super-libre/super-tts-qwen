@@ -12,12 +12,12 @@
 # beyond the one they load.
 
 [backend]
-    id = "app.super-tts.qwen"
+    id = "app.super-voice.qwen-tts"
     source = "github.com/super-libre/super-voice-qwen-tts"
     name = "Qwen TTS"
     version = "0.1.0"
     kind = "subprocess"
-    entrypoint = "super-tts-backend-qwen"
+    entrypoint = "super-voice-backend-qwen-tts"
     product = "super-voice"
     contract = "v4"
     license = "GPL-3.0-only"
@@ -113,7 +113,7 @@
 # The vendor-neutral GPU path: Intel, an AMD card on the Mesa driver, an NVIDIA
 # card without CUDA installed. Ranked below the native backends by the daemon,
 # but it is the only GPU some hosts have. It computes in f16 where the device
-# has it and in f32 elsewhere, never in bf16 (see the README).
+# has it and in f32 elsewhere, never in bf16 (see `docs/port-notes.md`).
 #
 # The 1.2 floor is the sampling kernel's: it reduces across a plane, and the
 # subgroup types that needs are core in Vulkan 1.2 (CubeCL reaches for

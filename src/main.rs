@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Qwen text-to-speech backend for Super TTS.
+//! Qwen text-to-speech backend for Super Voice.
 //!
 //! Named for the family rather than a generation: the manifest declares which
 //! checkpoints it serves, and today those are Qwen3-TTS. [`model`] documents
