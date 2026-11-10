@@ -712,7 +712,7 @@ async fn synthesize(
 
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/vnd.super-tts.frames")
+        .header(header::CONTENT_TYPE, "application/vnd.super-voice.frames")
         .header(HeaderName::from_static("x-tts-sample-rate"), sample_rate)
         .header(HeaderName::from_static("x-tts-channels"), 1)
         .header(HeaderName::from_static("x-tts-format"), "s16le")
