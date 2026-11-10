@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Task runner for the standalone Qwen TTS backend. Mirrors the recipe names
-# used by the main super-tts repo and by the other out-of-tree backends, so
+# used by the main Super Voice repo and by the other out-of-tree backends, so
 # `just check` means the same thing everywhere.
 #
 # One thing is specific to this backend: Burn comes from a fork, pinned by
@@ -55,8 +55,8 @@ build-metal *args:
 #
 # Build and stage the binary for Import-from-dir. Usage: just stage [args]
 stage *args: (build-release args)
-    cp target/release/super-tts-backend-qwen super-tts-backend-qwen
-    @echo "staged super-tts-backend-qwen — this directory is now installable with Import from dir"
+    cp target/release/super-voice-backend-qwen-tts super-voice-backend-qwen-tts
+    @echo "staged super-voice-backend-qwen-tts — this directory is now installable with Import from dir"
 
 # Remove build output.
 clean:
@@ -69,9 +69,9 @@ clean:
 #
 # Remove build output and every generated artifact in the tree.
 clean-all: clean
-    rm -f super-tts-backend-qwen lcov.info *.profraw *.profdata
+    rm -f super-voice-backend-qwen-tts lcov.info *.profraw *.profdata
 
-# Runs a clippy check — mirrors super-tts's lint. Twice: the default Vulkan
+# Runs a clippy check — mirrors Super Voice's lint. Twice: the default Vulkan
 # build, and the `flex` one the tests run on, whose device arm only it compiles.
 check *args:
     cargo clippy --all-targets {{ args }} -- -W clippy::pedantic -D warnings -D unused_must_use

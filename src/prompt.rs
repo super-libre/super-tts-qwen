@@ -180,7 +180,7 @@ mod tokenizer_tests {
     /// Where `just fetch-tokenizer` puts the file, overridable for a checkout
     /// that keeps it elsewhere.
     fn tokenizer_path() -> std::path::PathBuf {
-        std::env::var_os("SUPER_TTS_TEST_TOKENIZER").map_or_else(
+        std::env::var_os("SUPER_VOICE_TEST_TOKENIZER").map_or_else(
             || {
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("target/test-backend/tokenizer.json")

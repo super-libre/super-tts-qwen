@@ -1896,7 +1896,7 @@ mod tests {
     /// codes, so it runs by hand:
     ///
     /// ```sh
-    /// QWEN_TTS_CODEC=$HOME/.local/share/super-tts/backends/app.super-tts.qwen-tts/models/qwen3-tts-1.7b-base/speech_tokenizer \
+    /// QWEN_TTS_CODEC=$HOME/.local/share/super-voice/backends/app.super-voice.qwen-tts/models/qwen3-tts-1.7b-base/speech_tokenizer \
     /// QWEN_TTS_CODES=/path/to/codes.bin \
     /// cargo test --release --no-default-features --features cuda -- --ignored --nocapture a_streamed_decode
     /// ```
