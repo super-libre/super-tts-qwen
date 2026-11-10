@@ -1,9 +1,9 @@
-# Super TTS — Qwen backend
+# Super Voice — Qwen TTS backend
 
-[![coverage](https://img.shields.io/endpoint?url=https://super-libre.github.io/super-tts-qwen/coverage.json)](https://super-libre.github.io/super-tts-qwen/)
+[![coverage](https://img.shields.io/endpoint?url=https://super-libre.github.io/super-voice-qwen-tts/coverage.json)](https://super-libre.github.io/super-voice-qwen-tts/)
 
 Qwen's text-to-speech models as a subprocess backend for
-[Super TTS](https://github.com/super-libre/super-tts). Ten languages, 24 kHz
+[Super Voice](https://github.com/jorge-menjivar/super-voice). Ten languages, 24 kHz
 output, nine preset voices — or no preset voice at all, and a voice written out
 in words instead.
 
@@ -14,7 +14,7 @@ sit side by side under one installed backend.
 
 ## What it is
 
-The Super TTS daemon does not compile model inference in-tree. It discovers
+The Super Voice daemon does not compile model inference in-tree. It discovers
 backends on disk and drives each one over a `/v1` HTTP contract on a Unix
 socket. This is one such backend: a single binary that runs the models through
 [Burn](https://github.com/tracel-ai/burn) and answers `POST /v1/synthesize`
@@ -356,7 +356,7 @@ device before the weights are mapped. The measurements are in
 ### Building
 
 ```sh
-git clone https://github.com/super-libre/super-tts-qwen
+git clone https://github.com/super-libre/super-voice-qwen-tts
 just build-release          # Vulkan, the default: needs nothing to build
 just build-cuda             # needs the CUDA headers — no GPU, no compute capability
 just build-rocm             # needs the ROCm headers

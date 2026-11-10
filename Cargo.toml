@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Standalone Qwen TTS subprocess backend, serving whichever generation of
 # Qwen's text-to-speech models the manifest declares — today the Qwen3-TTS
-# checkpoints. Depends only on third-party crates — no super-tts code. Excluded
+# checkpoints. Depends only on third-party crates — no Super Voice code. Excluded
 # from any parent workspace (own Cargo.lock).
 
 [package]
     name = "super-tts-backend-qwen"
     version = "0.1.0"
     edition = "2024"
-    description = "Qwen text-to-speech backend for Super TTS."
-    repository = "https://github.com/super-libre/super-tts-qwen"
+    description = "Qwen text-to-speech backend for Super Voice."
+    repository = "https://github.com/super-libre/super-voice-qwen-tts"
     license = "GPL-3.0-only"
     publish = false
 
