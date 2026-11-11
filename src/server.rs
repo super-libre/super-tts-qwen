@@ -566,14 +566,20 @@ fn decode_reference(audio: &str) -> Result<Vec<f32>, String> {
         .collect())
 }
 
-/// The header the daemon injects this backend's one `[[options]]` entry under.
+/// The headers the daemon injects this backend's one `[[options]]` entry
+/// under, in the order they are read.
 ///
-/// `x-tts-option-<name>` is the contract's own spelling, with the name
-/// [`voices::DESCRIPTION_OPTION`] declares; the test below is what keeps this
-/// string and that name the same pair. Written out rather than joined at
-/// runtime because it is read once per request and a `HeaderMap` lookup wants a
+/// `x-voice-option-<name>` is the contract's spelling, with the name
+/// [`voices::DESCRIPTION_OPTION`] declares. `x-tts-option-<name>` is the one
+/// daemons sent before the `x-voice-*` names, and still send beside them, so a
+/// daemon of either age is read. The test below is what keeps these strings
+/// and that name the same pair. Written out rather than joined at runtime
+/// because they are read once per request and a `HeaderMap` lookup wants a
 /// `&str` it does not have to own.
-const DESCRIPTION_HEADER: &str = "x-tts-option-voice_design_description";
+const DESCRIPTION_HEADERS: [&str; 2] = [
+    "x-voice-option-voice_design_description",
+    "x-tts-option-voice_design_description",
+];
 
 /// The description behind [`voices::CUSTOM_VOICE_ID`], read off one request.
 ///
@@ -589,9 +595,16 @@ const DESCRIPTION_HEADER: &str = "x-tts-option-voice_design_description";
 /// fall back to it.
 /// The header the daemon injects this backend's sampling option under.
 ///
-/// The same two spellings of one contract as [`DESCRIPTION_HEADER`], held
+/// The same spellings of one contract as [`DESCRIPTION_HEADERS`], held
 /// together by the test below.
-const TEMPERATURE_HEADER: &str = "x-tts-option-temperature";
+const TEMPERATURE_HEADERS: [&str; 2] = ["x-voice-option-temperature", "x-tts-option-temperature"];
+
+/// The value of the first of `names` a request carries as text.
+fn first_header<'a>(headers: &'a HeaderMap, names: &[&str]) -> Option<&'a str> {
+    names
+        .iter()
+        .find_map(|name| headers.get(*name).and_then(|v| v.to_str().ok()))
+}
 
 /// The sampling temperature one request asks for, read off its headers.
 ///
@@ -601,16 +614,12 @@ const TEMPERATURE_HEADER: &str = "x-tts-option-temperature";
 /// are mapped again is a setting the user will think is broken. Nothing about
 /// this one needs a reload — it reaches the sampler and nothing else.
 fn configured_temperature(headers: &HeaderMap) -> Option<f32> {
-    let value = headers
-        .get(TEMPERATURE_HEADER)
-        .and_then(|v| v.to_str().ok());
+    let value = first_header(headers, &TEMPERATURE_HEADERS);
     crate::model::temperature_option(value)
 }
 
 fn configured_voice(headers: &HeaderMap) -> Option<String> {
-    let value = headers
-        .get(DESCRIPTION_HEADER)
-        .and_then(|v| v.to_str().ok());
+    let value = first_header(headers, &DESCRIPTION_HEADERS);
     voices::configured(value).map(str::to_string)
 }
 
@@ -713,6 +722,11 @@ async fn synthesize(
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/vnd.super-voice.frames")
+        // Under the `x-voice-*` names, and under the `x-tts-*` ones the
+        // daemons before them read.
+        .header(HeaderName::from_static("x-voice-sample-rate"), sample_rate)
+        .header(HeaderName::from_static("x-voice-channels"), 1)
+        .header(HeaderName::from_static("x-voice-format"), "s16le")
         .header(HeaderName::from_static("x-tts-sample-rate"), sample_rate)
         .header(HeaderName::from_static("x-tts-channels"), 1)
         .header(HeaderName::from_static("x-tts-format"), "s16le")
@@ -1355,8 +1369,11 @@ mod tests {
     #[test]
     fn the_option_header_is_the_declared_option() {
         assert_eq!(
-            DESCRIPTION_HEADER,
-            format!("x-tts-option-{}", voices::DESCRIPTION_OPTION)
+            DESCRIPTION_HEADERS,
+            [
+                format!("x-voice-option-{}", voices::DESCRIPTION_OPTION),
+                format!("x-tts-option-{}", voices::DESCRIPTION_OPTION),
+            ]
         );
     }
 
@@ -1365,8 +1382,11 @@ mod tests {
     #[test]
     fn the_temperature_header_is_the_declared_option() {
         assert_eq!(
-            TEMPERATURE_HEADER,
-            format!("x-tts-option-{}", crate::model::TEMPERATURE_OPTION)
+            TEMPERATURE_HEADERS,
+            [
+                format!("x-voice-option-{}", crate::model::TEMPERATURE_OPTION),
+                format!("x-tts-option-{}", crate::model::TEMPERATURE_OPTION),
+            ]
         );
     }
 
@@ -1374,7 +1394,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         if let Some(value) = value {
             headers.insert(
-                HeaderName::from_static(TEMPERATURE_HEADER),
+                HeaderName::from_static(TEMPERATURE_HEADERS[0]),
                 value.parse().expect("a test header value must be valid"),
             );
         }
@@ -1416,7 +1436,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         if let Some(value) = description {
             headers.insert(
-                HeaderName::from_static(DESCRIPTION_HEADER),
+                HeaderName::from_static(DESCRIPTION_HEADERS[0]),
                 value.parse().expect("a test header value must be valid"),
             );
         }
@@ -1430,6 +1450,32 @@ mod tests {
             configured_voice(&headers).as_deref(),
             Some("A hoarse pirate.")
         );
+    }
+
+    /// A daemon from before the `x-voice-*` names sends only the `x-tts-*` one,
+    /// and its description is read all the same.
+    #[test]
+    fn a_description_under_the_former_name_is_read() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static(DESCRIPTION_HEADERS[1]),
+            "A hoarse pirate.".parse().unwrap(),
+        );
+        assert_eq!(
+            configured_voice(&headers).as_deref(),
+            Some("A hoarse pirate.")
+        );
+    }
+
+    /// The same for the sampling option.
+    #[test]
+    fn a_temperature_under_the_former_name_is_read() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static(TEMPERATURE_HEADERS[1]),
+            "1.1".parse().unwrap(),
+        );
+        assert_eq!(configured_temperature(&headers), Some(1.1));
     }
 
     /// The daemon omits the header for an option the user has not set, which is
@@ -1452,7 +1498,7 @@ mod tests {
     fn an_unrelated_option_header_is_left_alone() {
         let mut headers = with_description(Some("A hoarse pirate."));
         headers.insert(
-            HeaderName::from_static("x-tts-option-request_timeout_seconds"),
+            HeaderName::from_static("x-voice-option-request_timeout_seconds"),
             "30".parse().unwrap(),
         );
         assert_eq!(
@@ -1467,7 +1513,7 @@ mod tests {
     fn a_header_that_is_not_text_is_read_as_unset() {
         let mut headers = HeaderMap::new();
         headers.insert(
-            HeaderName::from_static(DESCRIPTION_HEADER),
+            HeaderName::from_static(DESCRIPTION_HEADERS[0]),
             axum::http::HeaderValue::from_bytes(&[0xff, 0xfe]).unwrap(),
         );
         assert_eq!(configured_voice(&headers), None);
@@ -1481,7 +1527,7 @@ mod tests {
         let (app, _) = app();
         let mut req = post("/v1/synthesize", &json!({ "text": "Hello." }));
         req.headers_mut().insert(
-            HeaderName::from_static(DESCRIPTION_HEADER),
+            HeaderName::from_static(DESCRIPTION_HEADERS[0]),
             "A hoarse pirate.".parse().unwrap(),
         );
         let (status, body) = call(app, req).await;

@@ -2091,7 +2091,7 @@ mod tests {
 
     /// Both ends inclusive, and every position the slider can stop on between
     /// them. As the daemon spells it: an option value crosses the wire as the
-    /// text of an `x-tts-option-*` header, whatever its declared type.
+    /// text of an `x-voice-option-*` header, whatever its declared type.
     #[test]
     fn every_temperature_in_the_range_is_accepted() {
         let (low, high) = TEMPERATURE_RANGE;
